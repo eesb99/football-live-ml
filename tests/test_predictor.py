@@ -11,7 +11,9 @@ from src.ratings import (
     DEFAULT_RATING,
     TeamRating,
     expected_score,
+    load_ratings,
     save_rating_snapshot,
+    save_ratings,
     update_ratings_from_results,
 )
 from src.storage import save_prediction_snapshot
@@ -103,6 +105,30 @@ def test_save_rating_snapshot(tmp_path):
     assert frame.loc[0, "team_id"] == 10
     assert frame.loc[0, "rating"] == 1512
     assert "snapshot_captured_at" in frame.columns
+
+
+def test_load_ratings_handles_blank_file(tmp_path):
+    path = tmp_path / "team_ratings.csv"
+    path.write_text("\n")
+
+    assert load_ratings(path) == {}
+
+
+def test_save_ratings_writes_headers_for_empty_ratings(tmp_path):
+    path = tmp_path / "team_ratings.csv"
+
+    save_ratings({}, path=path)
+
+    frame = pd.read_csv(path)
+    assert list(frame.columns) == [
+        "team_id",
+        "team_name",
+        "rating",
+        "matches_played",
+        "snapshot_captured_at",
+    ]
+    assert frame.empty
+    assert load_ratings(path) == {}
 
 
 def test_prematch_prediction_prefers_stronger_team():

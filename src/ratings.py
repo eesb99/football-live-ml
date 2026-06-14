@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pandas.errors import EmptyDataError
 
 from src.config import PROJECT_ROOT
 
@@ -15,6 +16,13 @@ HOME_ADVANTAGE_ELO = 60.0
 DEFAULT_K_FACTOR = 24.0
 RATINGS_DIR = PROJECT_ROOT / "data" / "ratings"
 RATINGS_PATH = RATINGS_DIR / "team_ratings.csv"
+RATING_COLUMNS = [
+    "team_id",
+    "team_name",
+    "rating",
+    "matches_played",
+    "snapshot_captured_at",
+]
 
 
 @dataclass(frozen=True)
@@ -131,7 +139,14 @@ def update_ratings_from_results(
 def load_ratings(path: Path = RATINGS_PATH) -> RatingMap:
     if not path.exists():
         return {}
-    frame = pd.read_csv(path)
+    if not path.read_text().strip():
+        return {}
+    try:
+        frame = pd.read_csv(path)
+    except EmptyDataError:
+        return {}
+    if frame.empty or "team_id" not in frame.columns:
+        return {}
     ratings: RatingMap = {}
     for row in frame.to_dict("records"):
         team_id = int(row["team_id"])
@@ -152,7 +167,7 @@ def save_ratings(ratings: RatingMap, path: Path = RATINGS_PATH) -> Path:
         row = rating.as_dict()
         row["snapshot_captured_at"] = captured_at
         rows.append(row)
-    pd.DataFrame(rows).to_csv(path, index=False)
+    pd.DataFrame(rows, columns=RATING_COLUMNS).to_csv(path, index=False)
     return path
 
 
