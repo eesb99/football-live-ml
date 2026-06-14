@@ -18,7 +18,7 @@ from src.ratings import (
 )
 
 
-MODEL_VERSION = "world-cup-predictor-v1"
+MODEL_VERSION = "world-cup-rules-v2"
 FINAL_STATUSES = {"FT", "AET", "PEN"}
 PREMATCH_STATUSES = {"TBD", "NS", "PST", "CANC", "ABD", "AWD", "WO"}
 

@@ -5,6 +5,7 @@ from src.features import (
     build_match_features,
     event_summary,
     parse_percentage,
+    proxy_expected_goals,
 )
 from src.model import predict_match_probabilities
 from src.storage import save_snapshot
@@ -120,6 +121,13 @@ def test_build_match_features_extracts_live_state():
     assert features["home_xg"] == 1.74
     assert features["away_xg"] == 0.82
     assert round(features["xg_difference"], 2) == 0.92
+    assert features["home_proxy_xg"] > 0
+    assert features["away_proxy_xg"] > 0
+    assert features["home_effective_xg"] == 1.74
+    assert features["away_effective_xg"] == 0.82
+    assert features["xg_source"] == "api_football_real_xg"
+    assert features["real_xg_available"] is True
+    assert features["proxy_xg_available"] is True
     assert features["away_shots_on_target"] == 2
     assert features["home_possession"] == 58.0
     assert features["away_corners"] == 3
@@ -133,6 +141,59 @@ def test_build_match_features_extracts_live_state():
     assert features["away_recent_events"] == 1
     assert 0.0 <= features["home_pressure_share"] <= 1.0
     assert features["data_completeness_score"] == 1.0
+
+
+def test_proxy_expected_goals_uses_live_attacking_signals():
+    low_quality = proxy_expected_goals(
+        shots=3,
+        shots_on_target=0,
+        shots_inside_box=1,
+        corners=1,
+        possession=45,
+        recent_events=0,
+        recent_goals=0,
+    )
+    high_quality = proxy_expected_goals(
+        shots=12,
+        shots_on_target=6,
+        shots_inside_box=8,
+        corners=7,
+        possession=61,
+        recent_events=2,
+        recent_goals=1,
+    )
+
+    assert high_quality > low_quality
+    assert high_quality <= 4.5
+
+
+def test_build_match_features_uses_proxy_xg_when_real_xg_missing():
+    statistics = []
+    for team in sample_statistics():
+        copied = {
+            "team": team["team"],
+            "statistics": [
+                stat
+                for stat in team["statistics"]
+                if stat["type"] != "Expected Goals"
+            ],
+        }
+        statistics.append(copied)
+
+    features = build_match_features(
+        sample_fixture(),
+        statistics=statistics,
+        events=sample_events(),
+    )
+
+    assert features["home_xg"] == 0.0
+    assert features["away_xg"] == 0.0
+    assert features["home_proxy_xg"] > 0
+    assert features["away_proxy_xg"] > 0
+    assert features["home_effective_xg"] == features["home_proxy_xg"]
+    assert features["away_effective_xg"] == features["away_proxy_xg"]
+    assert features["xg_source"] == "proxy_xg"
+    assert features["real_xg_available"] is False
 
 
 def test_event_summary_counts_cards_goals_and_recent_events():

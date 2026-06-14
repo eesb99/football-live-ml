@@ -393,12 +393,29 @@ def extracted_feature_rows(features: dict[str, Any]) -> list[dict[str, Any]]:
     ) > 0.0:
         rows.append(
             {
-                "signal": "API expected goals",
+                "signal": "Real expected goals",
                 "home": numeric_value(features.get("home_xg"), 2),
                 "away": numeric_value(features.get("away_xg"), 2),
                 "match": numeric_value(features.get("xg_difference"), 2),
             }
         )
+
+    rows.extend(
+        [
+            {
+                "signal": "Proxy expected goals",
+                "home": numeric_value(features.get("home_proxy_xg"), 2),
+                "away": numeric_value(features.get("away_proxy_xg"), 2),
+                "match": numeric_value(features.get("proxy_xg_difference"), 2),
+            },
+            {
+                "signal": "Effective expected goals",
+                "home": numeric_value(features.get("home_effective_xg"), 2),
+                "away": numeric_value(features.get("away_effective_xg"), 2),
+                "match": str(features.get("xg_source") or "proxy_xg"),
+            },
+        ]
+    )
 
     rows.extend(
         [
@@ -425,6 +442,48 @@ def extracted_feature_rows(features: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def data_source_rows(
+    features: dict[str, Any],
+    prediction: dict[str, Any],
+) -> list[dict[str, Any]]:
+    xg_source = str(prediction.get("xg_source") or features.get("xg_source") or "proxy_xg")
+    real_xg_available = bool(
+        prediction.get("real_xg_available") or features.get("real_xg_available")
+    )
+    return [
+        {
+            "source": "Model mode",
+            "status": str(prediction.get("prediction_mode") or "-"),
+            "detail": str(prediction.get("model_version") or "-"),
+        },
+        {
+            "source": "xG",
+            "status": "real xG" if real_xg_available else "proxy xG",
+            "detail": xg_source,
+        },
+        {
+            "source": "Odds adapter",
+            "status": "available" if prediction.get("odds_available") else "missing",
+            "detail": str(prediction.get("odds_source") or "not configured"),
+        },
+        {
+            "source": "Real xG adapter",
+            "status": "available" if prediction.get("real_xg_available") else "missing",
+            "detail": str(prediction.get("real_xg_source") or "not configured"),
+        },
+        {
+            "source": "Injuries adapter",
+            "status": "available" if prediction.get("injuries_available") else "missing",
+            "detail": str(prediction.get("injuries_source") or "not configured"),
+        },
+        {
+            "source": "News adapter",
+            "status": "available" if prediction.get("news_available") else "missing",
+            "detail": str(prediction.get("news_source") or "not configured"),
+        },
+    ]
+
+
 def strength_component_rows(
     features: dict[str, Any],
     prediction: dict[str, Any],
@@ -435,6 +494,12 @@ def strength_component_rows(
             "home": numeric_value(prediction.get("home_strength_score"), 2),
             "away": numeric_value(prediction.get("away_strength_score"), 2),
             "influence": "Combined pressure, shots, discipline, possession, recency, and score state",
+        },
+        {
+            "component": "Effective xG",
+            "home": numeric_value(prediction.get("home_effective_xg"), 2),
+            "away": numeric_value(prediction.get("away_effective_xg"), 2),
+            "influence": f"Uses {prediction.get('xg_source', 'proxy_xg')} for attacking quality",
         },
         {
             "component": "Pressure score",
@@ -491,6 +556,11 @@ def expected_goal_rows(prediction: dict[str, Any]) -> list[dict[str, Any]]:
             "metric": "Projected total expected goals",
             "home": numeric_value(prediction.get("home_expected_goals"), 2),
             "away": numeric_value(prediction.get("away_expected_goals"), 2),
+        },
+        {
+            "metric": "Effective xG input",
+            "home": numeric_value(prediction.get("home_effective_xg"), 2),
+            "away": numeric_value(prediction.get("away_effective_xg"), 2),
         },
         {
             "metric": "Remaining expected goals",
@@ -811,6 +881,13 @@ def render_model_breakdown(
     selected_events: list[dict[str, Any]],
 ) -> None:
     render_selected_header(features)
+
+    st.markdown("#### Data source status")
+    st.dataframe(
+        pd.DataFrame(data_source_rows(features, prediction)),
+        width="stretch",
+        hide_index=True,
+    )
 
     rows = probability_rows(prediction)
     st.markdown("#### Final blended probabilities")

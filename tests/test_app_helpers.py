@@ -3,6 +3,7 @@ from src.ratings import TeamRating
 
 from app.streamlit_app import (
     arrow_safe_dataframe,
+    data_source_rows,
     elo_prior_rows,
     expected_goal_rows,
     extracted_feature_rows,
@@ -66,6 +67,15 @@ def features():
         "home_xg": 1.62,
         "away_xg": 0.51,
         "xg_difference": 1.11,
+        "home_proxy_xg": 1.12,
+        "away_proxy_xg": 0.44,
+        "proxy_xg_difference": 0.68,
+        "home_effective_xg": 1.62,
+        "away_effective_xg": 0.51,
+        "effective_xg_difference": 1.11,
+        "xg_source": "api_football_real_xg",
+        "real_xg_available": True,
+        "proxy_xg_available": True,
         "home_shots_on_target": 6,
         "away_shots_on_target": 1,
         "shots_on_target_difference": 5,
@@ -108,12 +118,25 @@ def prediction():
         "no_next_goal_probability": 0.56,
         "home_strength_score": 4.8,
         "away_strength_score": 2.1,
+        "home_proxy_xg": 1.12,
+        "away_proxy_xg": 0.44,
+        "home_effective_xg": 1.62,
+        "away_effective_xg": 0.51,
+        "xg_source": "api_football_real_xg",
         "home_expected_goals": 1.9,
         "away_expected_goals": 0.8,
         "home_expected_remaining_goals": 0.52,
         "away_expected_remaining_goals": 0.22,
         "model_confidence": 0.72,
-        "model_version": "world-cup-predictor-v1",
+        "model_version": "world-cup-rules-v2",
+        "odds_available": False,
+        "real_xg_available": True,
+        "injuries_available": False,
+        "news_available": False,
+        "odds_source": "not configured",
+        "real_xg_source": "api_football_real_xg",
+        "injuries_source": "not configured",
+        "news_source": "not configured",
     }
 
 
@@ -147,7 +170,9 @@ def test_extracted_feature_rows_include_core_features_and_xg_when_available():
     assert metrics["Minute"]["match"] == "65'"
     assert metrics["Shots"]["home"] == "14"
     assert metrics["Possession"]["home"] == "61.0%"
-    assert metrics["API expected goals"]["home"] == "1.62"
+    assert metrics["Real expected goals"]["home"] == "1.62"
+    assert metrics["Proxy expected goals"]["home"] == "1.12"
+    assert metrics["Effective expected goals"]["match"] == "api_football_real_xg"
 
 
 def test_strength_and_expected_goal_rows_expose_model_layers():
@@ -156,8 +181,20 @@ def test_strength_and_expected_goal_rows_expose_model_layers():
 
     assert strength_rows[0]["component"] == "Live strength score"
     assert strength_rows[0]["home"] == "4.80"
-    assert xg_rows[1]["metric"] == "Remaining expected goals"
-    assert xg_rows[2]["home"] == "31.0%"
+    assert strength_rows[1]["component"] == "Effective xG"
+    assert xg_rows[1]["metric"] == "Effective xG input"
+    assert xg_rows[2]["metric"] == "Remaining expected goals"
+    assert xg_rows[3]["home"] == "31.0%"
+
+
+def test_data_source_rows_show_model_and_adapter_status():
+    rows = data_source_rows(features(), prediction())
+    sources = {row["source"]: row for row in rows}
+
+    assert sources["Model mode"]["status"] == "live"
+    assert sources["xG"]["status"] == "real xG"
+    assert sources["Odds adapter"]["status"] == "missing"
+    assert sources["Real xG adapter"]["detail"] == "api_football_real_xg"
 
 
 def test_fixture_statistics_display_rows_flatten_percentages_and_mixed_values():

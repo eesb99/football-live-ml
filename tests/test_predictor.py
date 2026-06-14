@@ -1,7 +1,12 @@
 import pandas as pd
 
+from src.adapters import PaidDataSnapshot
 from src.features import build_match_features
-from src.predictor import predict_fixture, prediction_snapshot_row
+from src.predictor import (
+    apply_paid_data_to_features,
+    predict_fixture,
+    prediction_snapshot_row,
+)
 from src.ratings import (
     DEFAULT_RATING,
     TeamRating,
@@ -133,7 +138,58 @@ def test_live_prediction_blends_prior_and_live_features():
     assert prediction["prediction_mode"] == "live"
     assert prediction["home_win_probability"] > prediction["away_win_probability"]
     assert prediction["next_goal_probability"] > 0
+    assert prediction["xg_source"] == "proxy_xg"
+    assert prediction["home_proxy_xg"] > 0
+    assert prediction["home_effective_xg"] == prediction["home_proxy_xg"]
+    assert prediction["odds_available"] is False
+    assert "proxy xG" in prediction["model_driver_summary"]
     assert any("red cards" in driver for driver in prediction["model_drivers"])
+
+
+def test_live_prediction_uses_paid_real_xg_when_available():
+    paid_data = PaidDataSnapshot(
+        real_xg_available=True,
+        real_xg_source="paid-test-xg",
+        home_real_xg=2.1,
+        away_real_xg=0.4,
+    )
+    prediction = predict_fixture(
+        fixture("2H", 65, 1, 0),
+        statistics=live_statistics(),
+        events=live_events(),
+        ratings={
+            10: TeamRating(team_id=10, team_name="Alpha", rating=1500, matches_played=4),
+            20: TeamRating(team_id=20, team_name="Beta", rating=1500, matches_played=4),
+        },
+        paid_data=paid_data,
+    )
+
+    assert prediction["prediction_mode"] == "live"
+    assert prediction["real_xg_available"] is True
+    assert prediction["real_xg_source"] == "paid-test-xg"
+    assert prediction["xg_source"] == "paid-test-xg"
+    assert prediction["home_effective_xg"] == 2.1
+    assert prediction["away_effective_xg"] == 0.4
+    assert "Real xG source is available" in prediction["model_driver_summary"]
+
+
+def test_apply_paid_data_to_features_overrides_effective_xg():
+    match = fixture("2H", 65, 1, 0)
+    features = build_match_features(match, statistics=live_statistics(), events=live_events())
+    paid_data = PaidDataSnapshot(
+        real_xg_available=True,
+        real_xg_source="paid-test-xg",
+        home_real_xg=1.8,
+        away_real_xg=0.7,
+    )
+
+    enriched = apply_paid_data_to_features(features, paid_data)
+
+    assert enriched["home_xg"] == 1.8
+    assert enriched["away_xg"] == 0.7
+    assert enriched["home_effective_xg"] == 1.8
+    assert enriched["away_effective_xg"] == 0.7
+    assert enriched["xg_source"] == "paid-test-xg"
 
 
 def test_prediction_snapshot_row_and_storage(tmp_path):
@@ -146,5 +202,7 @@ def test_prediction_snapshot_row_and_storage(tmp_path):
     frame = pd.read_csv(path)
     assert frame.loc[0, "fixture_id"] == 9001
     assert frame.loc[0, "prediction_mode"] == "live"
-    assert frame.loc[0, "model_version"] == "world-cup-predictor-v1"
+    assert frame.loc[0, "model_version"] == "world-cup-rules-v2"
+    assert frame.loc[0, "xg_source"] == "proxy_xg"
+    assert frame.loc[0, "odds_available"] == False
     assert frame.loc[0, "snapshot_row_count"] == 1
