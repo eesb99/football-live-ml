@@ -13,6 +13,8 @@ The dashboard supports individual-budget World Cup prediction workflows:
 - pre-match prediction from local Elo-style team ratings
 - live prediction from match events and statistics
 - model-driver explanations
+- model source/status display
+- proxy xG fallback when real xG is unavailable
 - expected remaining goals
 - model confidence
 - local prediction snapshots
@@ -85,11 +87,9 @@ If API-Football rejects the selected season on the current plan, the app automat
 
 Dashboard tabs:
 
-- **Match Board**: World Cup fixtures or live fixtures with prediction columns.
-- **Calendar**: match-day schedule grouped by Malaysia Time (MYT, UTC+8).
-- **Pre-Match Prediction**: home/draw/away probabilities from local Elo-style ratings.
-- **Live Prediction**: next-goal and remaining-goal outputs when live data exists.
-- **Model Drivers**: readable reasons behind the prediction.
+- **Schedule**: calendar and match board grouped by Malaysia Time (MYT, UTC+8).
+- **Predictions**: home/draw/away probabilities, next-goal outputs, and outcome bars.
+- **Model Breakdown**: model mode, data source availability, Elo prior, extracted features, proxy/real xG status, live strength components, Poisson expected goals, and explanation drivers.
 - **Backtest**: basic completed-fixture prediction check.
 - **Snapshots**: latest local prediction snapshot files.
 
@@ -103,6 +103,7 @@ football-live-ml/
   .gitignore
   src/
     config.py
+    adapters.py
     api_client.py
     features.py
     model.py
@@ -118,6 +119,7 @@ football-live-ml/
   tests/
     test_features.py
     test_predictor.py
+    test_adapters.py
 ```
 
 ## Snapshots
@@ -138,10 +140,14 @@ Snapshot files contain fixture metadata, model outputs, capture timestamps, and 
 
 ## Model And Features
 
+The current prediction stack is a v2 rules-based engine. It deliberately does not train a model yet.
+
+Training should wait until there are enough stored snapshots paired with final match outcomes for backtesting and calibration.
+
 The prediction stack has two layers:
 
-- **Pre-match**: local Elo-style team ratings with fallback rating `1500`.
-- **Live**: transparent Poisson live-state update using API-Football statistics/events.
+- **Pre-match**: local Elo-style team ratings with fallback rating `1500`, home advantage, expected goals, and home/draw/away probability.
+- **Live**: pre-match probability as the prior, then transparent Poisson live-state update using API-Football statistics/events.
 
 The combined predictor blends the pre-match prior with live match state when a fixture is live.
 
@@ -150,6 +156,7 @@ Feature extraction includes:
 - match state: minute, elapsed fraction, remaining fraction, score difference
 - discipline: red cards, yellow cards, card differences
 - attacking pressure: shots, shots on target, corners, possession, pressure share
+- xG quality: real API-Football xG when returned, otherwise proxy xG from shots, shots on target, shots inside box, corners, possession, recent events, and recent goals
 - passing and defensive context: pass accuracy, goalkeeper saves, fouls, offsides
 - event context: recent events, recent goals, penalty goals
 - quality flags: data completeness score
@@ -158,11 +165,21 @@ Feature extraction includes:
 The Poisson model adjusts expected remaining goals using:
 
 - team pressure share and shot quality
+- effective xG pace, using real xG first and proxy xG as fallback
 - home advantage
 - score-state incentives
 - red/yellow card effects
 - match tempo
 - remaining match time
+
+Optional paid-data adapter interfaces live in `src/adapters.py`:
+
+- odds
+- real xG
+- injuries
+- news
+
+These interfaces are fallback-safe. With no paid provider configured, the dashboard still works and clearly shows missing provider status. If real xG or odds are unavailable, the engine uses proxy xG and Elo/team-rating priors instead.
 
 `src/model.py` still includes a placeholder adapter for a future scikit-learn model.
 
@@ -189,4 +206,4 @@ pip install pytest
 - The API key is read only from `API_FOOTBALL_KEY`.
 - The API request header is `x-apisports-key`.
 - Missing API keys, API errors, empty live-match responses, and quota/rate-limit responses are handled with explicit exceptions and dashboard messages.
-- The active provider is API-Football only. Opta, Sportradar, SportMonks, databases, deployments, and paid-provider integrations are intentionally out of scope for the current individual-budget version.
+- The active live fixture provider is API-Football only. Optional paid-data adapter interfaces exist, but Opta, Sportradar, SportMonks, databases, deployments, and real paid-provider implementations are intentionally out of scope for the current individual-budget version.

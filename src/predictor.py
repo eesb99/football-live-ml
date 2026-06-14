@@ -303,6 +303,15 @@ def final_prediction(features: dict[str, Any], prematch: dict[str, Any]) -> dict
     else:
         draw = 1.0
     result = dict(prematch)
+    real_xg_available = bool(
+        features.get("real_xg_available", result.get("real_xg_available", False))
+    )
+    result["paid_data_availability"] = (
+        f"odds={'available' if result.get('odds_available') else 'missing'}, "
+        f"real_xg={'available' if real_xg_available else 'missing'}, "
+        f"injuries={'available' if result.get('injuries_available') else 'missing'}, "
+        f"news={'available' if result.get('news_available') else 'missing'}"
+    )
     result.update(
         {
             "prediction_mode": "final",
@@ -325,7 +334,7 @@ def final_prediction(features: dict[str, Any], prematch: dict[str, Any]) -> dict
             ),
             "xg_source": features.get("xg_source", result.get("xg_source", "proxy_xg")),
             "real_xg_available": bool(
-                features.get("real_xg_available", result.get("real_xg_available", False))
+                real_xg_available
             ),
             "real_xg_source": str(
                 features.get("xg_source", result.get("real_xg_source", "not configured"))
