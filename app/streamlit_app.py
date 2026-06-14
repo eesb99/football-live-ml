@@ -14,6 +14,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.api_client import ApiFootballClient, ApiFootballError, ApiFootballRateLimitError
 from src.config import MissingApiKeyError, load_settings
+from src.external_predictions import (
+    normalize_api_football_prediction,
+    unavailable_prediction,
+)
 from src.features import build_live_match_table, build_match_features, is_live_status
 from src.predictor import predict_fixture, prediction_snapshot_row, prematch_prediction
 from src.ratings import (
@@ -39,37 +43,82 @@ WORLD_CUP_DEFAULT_LEAGUE_ID = 1
 WORLD_CUP_DEFAULT_SEASON = 2026
 FREE_PLAN_FALLBACK_SEASONS = [2022, 2023, 2024]
 WORLD_CUP_KEYWORDS = ("world cup", "fifa world cup")
+FINAL_STATUS_SHORTS = {"FT", "AET", "PEN"}
 
 
 def apply_page_styles() -> None:
     st.markdown(
         """
         <style>
-        .stApp { background: #f7f8fb; }
+        .stApp {
+            background: #f7f8fb !important;
+            color: #172033 !important;
+        }
+        section[data-testid="stMain"] {
+            background: #f7f8fb !important;
+            color: #172033 !important;
+        }
         .block-container {
             padding-top: 1.7rem;
             padding-bottom: 2rem;
             max-width: 1240px;
+            color: #172033 !important;
         }
         .match-title {
-            color: #172033;
+            color: #172033 !important;
             font-size: 1.45rem;
             font-weight: 760;
             margin-bottom: 0.2rem;
         }
         .muted-line {
-            color: #64748b;
+            color: #64748b !important;
             font-size: 0.92rem;
             margin-bottom: 0.9rem;
         }
         .snapshot-line {
-            color: #475569;
+            color: #475569 !important;
             font-size: 0.85rem;
             margin-top: 0.65rem;
         }
-        h1, h2, h3 { color: #172033; letter-spacing: 0; }
+        section[data-testid="stMain"] h1,
+        section[data-testid="stMain"] h2,
+        section[data-testid="stMain"] h3,
+        section[data-testid="stMain"] h4,
+        section[data-testid="stMain"] h5,
+        section[data-testid="stMain"] h6 {
+            color: #172033 !important;
+            letter-spacing: 0 !important;
+            opacity: 1 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stMarkdownContainer"] {
+            color: #172033 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stMarkdownContainer"] p {
+            color: #475569 !important;
+            opacity: 1 !important;
+        }
+        section[data-testid="stMain"] label,
+        section[data-testid="stMain"] label p {
+            color: #334155 !important;
+            opacity: 1 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stCaptionContainer"],
+        section[data-testid="stMain"] div[data-testid="stCaptionContainer"] * {
+            color: #64748b !important;
+            opacity: 1 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stAlert"] p {
+            color: #334155 !important;
+        }
         div[data-testid="stTabs"] button {
             font-weight: 650;
+        }
+        section[data-testid="stMain"] div[data-testid="stTabs"] button p {
+            color: #64748b !important;
+            opacity: 1 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stTabs"] button[aria-selected="true"] p {
+            color: #ef4444 !important;
         }
         div[data-testid="stMetric"] {
             background: #ffffff;
@@ -90,6 +139,15 @@ def apply_page_styles() -> None:
 
 def percentage(value: float) -> str:
     return f"{value * 100:.1f}%"
+
+
+def optional_percentage(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return percentage(float(value))
+    except (TypeError, ValueError):
+        return "-"
 
 
 def numeric_value(value: Any, decimals: int = 1, suffix: str = "") -> str:
@@ -284,6 +342,93 @@ def probability_rows(prediction: dict[str, Any]) -> list[dict[str, Any]]:
             "group": "next goal",
         },
     ]
+
+
+def outcome_label(outcome: str) -> str:
+    labels = {"home": "Home win", "draw": "Draw", "away": "Away win"}
+    return labels.get(outcome, "-")
+
+
+def actual_outcome_from_features(features: dict[str, Any]) -> str | None:
+    if features.get("status_short") not in FINAL_STATUS_SHORTS:
+        return None
+    home_goals = int(features.get("home_goals", 0) or 0)
+    away_goals = int(features.get("away_goals", 0) or 0)
+    if home_goals > away_goals:
+        return "home"
+    if home_goals < away_goals:
+        return "away"
+    return "draw"
+
+
+def predicted_outcome_from_probabilities(prediction: dict[str, Any]) -> str:
+    probabilities = {
+        "home": float(prediction.get("home_win_probability", 0.0) or 0.0),
+        "draw": float(prediction.get("draw_probability", 0.0) or 0.0),
+        "away": float(prediction.get("away_win_probability", 0.0) or 0.0),
+    }
+    return max(probabilities, key=probabilities.get)
+
+
+def outcome_probability(prediction: dict[str, Any], outcome: str) -> float:
+    keys = {
+        "home": "home_win_probability",
+        "draw": "draw_probability",
+        "away": "away_win_probability",
+    }
+    return float(prediction.get(keys[outcome], 0.0) or 0.0)
+
+
+def model_result_banner_data(
+    fixture: dict[str, Any],
+    features: dict[str, Any],
+    selected_prediction: dict[str, Any],
+    ratings: RatingMap,
+) -> dict[str, Any]:
+    actual = actual_outcome_from_features(features)
+    if actual is None:
+        live_prediction = predicted_outcome_from_probabilities(selected_prediction)
+        return {
+            "status": "pending",
+            "headline": "Result pending",
+            "detail": (
+                "Final score is not available yet. Current model leans "
+                f"{outcome_label(live_prediction)} at "
+                f"{percentage(outcome_probability(selected_prediction, live_prediction))}."
+            ),
+            "predicted": live_prediction,
+            "actual": None,
+            "basis": selected_prediction.get("prediction_mode", "current"),
+            "correct": None,
+        }
+
+    evaluation_prediction = selected_prediction
+    basis = str(selected_prediction.get("prediction_mode") or "current")
+    if basis == "final":
+        evaluation_prediction = prematch_prediction(fixture, ratings=ratings)
+        basis = "pre-match prior"
+
+    predicted = predicted_outcome_from_probabilities(evaluation_prediction)
+    correct = predicted == actual
+    teams = fixture.get("teams", {})
+    home_team = features.get("home_team") or teams.get("home", {}).get("name", "Home")
+    away_team = features.get("away_team") or teams.get("away", {}).get("name", "Away")
+    return {
+        "status": "win" if correct else "loss",
+        "headline": "Our model WIN" if correct else "Our model LOSS",
+        "detail": (
+            f"Predicted {outcome_label(predicted)} at "
+            f"{percentage(outcome_probability(evaluation_prediction, predicted))}; "
+            f"actual result was {outcome_label(actual)} "
+            f"({home_team} {features.get('home_goals', 0)}-"
+            f"{features.get('away_goals', 0)} {away_team}). "
+            f"Evaluation basis: {basis}."
+        ),
+        "predicted": predicted,
+        "actual": actual,
+        "basis": basis,
+        "correct": correct,
+    }
 
 
 def elo_prior_rows(
@@ -584,6 +729,115 @@ def expected_goal_rows(prediction: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def comparison_status_rows(api_prediction: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": "API-Football prediction endpoint",
+            "status": str(api_prediction.get("status") or "missing"),
+            "detail": str(api_prediction.get("endpoint") or "/predictions"),
+        },
+        {
+            "source": "Availability",
+            "status": "available" if api_prediction.get("available") else "unavailable",
+            "detail": str(api_prediction.get("last_error") or ""),
+        },
+    ]
+
+
+def model_comparison_rows(
+    prediction: dict[str, Any],
+    api_prediction: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "metric": "Home win",
+            "our_model": percentage(prediction["home_win_probability"]),
+            "api_football": str(api_prediction.get("home_display") or "-"),
+            "difference": probability_difference(
+                prediction.get("home_win_probability"),
+                api_prediction.get("home_probability"),
+            ),
+        },
+        {
+            "metric": "Draw",
+            "our_model": percentage(prediction["draw_probability"]),
+            "api_football": str(api_prediction.get("draw_display") or "-"),
+            "difference": probability_difference(
+                prediction.get("draw_probability"),
+                api_prediction.get("draw_probability"),
+            ),
+        },
+        {
+            "metric": "Away win",
+            "our_model": percentage(prediction["away_win_probability"]),
+            "api_football": str(api_prediction.get("away_display") or "-"),
+            "difference": probability_difference(
+                prediction.get("away_win_probability"),
+                api_prediction.get("away_probability"),
+            ),
+        },
+        {
+            "metric": "Home scores next",
+            "our_model": optional_percentage(
+                prediction.get("home_scores_next_probability")
+            ),
+            "api_football": "-",
+            "difference": "-",
+        },
+        {
+            "metric": "Away scores next",
+            "our_model": optional_percentage(
+                prediction.get("away_scores_next_probability")
+            ),
+            "api_football": "-",
+            "difference": "-",
+        },
+    ]
+
+
+def probability_difference(our_value: Any, external_value: Any) -> str:
+    if external_value is None:
+        return "-"
+    try:
+        diff = float(our_value) - float(external_value)
+    except (TypeError, ValueError):
+        return "-"
+    sign = "+" if diff >= 0 else ""
+    return f"{sign}{diff * 100:.1f} pp"
+
+
+def api_football_advice_rows(api_prediction: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "field": "Advice",
+            "value": str(api_prediction.get("advice") or "-"),
+        },
+        {
+            "field": "Winner",
+            "value": str(api_prediction.get("winner_name") or "-"),
+        },
+        {
+            "field": "Winner comment",
+            "value": str(api_prediction.get("winner_comment") or "-"),
+        },
+        {
+            "field": "Win or draw",
+            "value": api_display_value(api_prediction.get("win_or_draw")),
+        },
+        {
+            "field": "Under/over",
+            "value": str(api_prediction.get("under_over") or "-"),
+        },
+        {
+            "field": "Predicted goals",
+            "value": (
+                f"{api_prediction.get('goals_home') or '-'} - "
+                f"{api_prediction.get('goals_away') or '-'}"
+            ),
+        },
+    ]
+
+
 def is_world_cup_fixture(fixture: dict[str, Any], world_cup_league_id: int) -> bool:
     league = fixture.get("league", {})
     league_id = int(league.get("id") or 0)
@@ -679,6 +933,17 @@ def fetch_fixture_detail(fixture_id: int) -> tuple[list[dict[str, Any]], list[di
     settings = load_settings()
     client = ApiFootballClient(settings)
     return client.get_fixture_statistics(fixture_id), client.get_fixture_events(fixture_id)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_api_football_prediction(fixture_id: int) -> dict[str, Any]:
+    settings = load_settings()
+    client = ApiFootballClient(settings)
+    try:
+        response = client.get_fixture_predictions(fixture_id)
+    except ApiFootballError as exc:
+        return unavailable_prediction(fixture_id, "error", last_error=str(exc))
+    return normalize_api_football_prediction(response, fixture_id)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -863,6 +1128,16 @@ def render_selected_header(features: dict[str, Any]) -> None:
     )
 
 
+def render_model_result_banner(banner: dict[str, Any]) -> None:
+    message = f"**{banner['headline']}** - {banner['detail']}"
+    if banner["status"] == "win":
+        st.success(message)
+    elif banner["status"] == "loss":
+        st.error(message)
+    else:
+        st.info(message)
+
+
 def render_model_drivers(prediction: dict[str, Any]) -> None:
     drivers = prediction.get("model_drivers") or []
     if not drivers:
@@ -943,6 +1218,75 @@ def render_model_breakdown(
         )
 
 
+def render_model_comparison(
+    features: dict[str, Any],
+    prediction: dict[str, Any],
+    api_prediction: dict[str, Any],
+) -> None:
+    render_selected_header(features)
+    st.caption(
+        "Benchmark/reference comparison only. API-Football predictions are not used "
+        "inside our world-cup-rules-v2 probability calculation."
+    )
+
+    st.markdown("#### Data source status")
+    st.dataframe(
+        pd.DataFrame(comparison_status_rows(api_prediction)),
+        width="stretch",
+        hide_index=True,
+    )
+
+    if not api_prediction.get("available"):
+        st.warning(
+            "API-Football prediction data is unavailable for this fixture or plan. "
+            "Our v2 rules model remains active."
+        )
+
+    st.markdown("#### Side-by-side probabilities")
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown("##### Our v2 rules model")
+        render_probability_cards(probability_rows(prediction), "match outcome")
+    with cols[1]:
+        st.markdown("##### API-Football prediction")
+        api_cols = st.columns(3)
+        for column, label, key in [
+            (api_cols[0], "Home win", "home_probability"),
+            (api_cols[1], "Draw", "draw_probability"),
+            (api_cols[2], "Away win", "away_probability"),
+        ]:
+            value = api_prediction.get(key)
+            with column:
+                st.metric(label, optional_percentage(value))
+                if value is not None:
+                    st.progress(float(value))
+
+    st.dataframe(
+        pd.DataFrame(model_comparison_rows(prediction, api_prediction)),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("#### Next goal")
+    next_goal_cols = st.columns(3)
+    next_goal_cols[0].metric(
+        "Our home scores next",
+        optional_percentage(prediction.get("home_scores_next_probability")),
+    )
+    next_goal_cols[1].metric(
+        "Our away scores next",
+        optional_percentage(prediction.get("away_scores_next_probability")),
+    )
+    next_goal_cols[2].metric("API-Football next goal", "not provided")
+
+    st.markdown("#### API-Football advice")
+    st.dataframe(
+        pd.DataFrame(api_football_advice_rows(api_prediction)),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[dict[str, Any]]:
     rows = []
     for fixture in fixtures:
@@ -953,7 +1297,7 @@ def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[di
         if status not in {"FT", "AET", "PEN"}:
             continue
         features = build_match_features(fixture)
-        prediction = predict_fixture(fixture, ratings=ratings)
+        prediction = prematch_prediction(fixture, ratings=ratings)
         probabilities = {
             "home": prediction["home_win_probability"],
             "draw": prediction["draw_probability"],
@@ -965,9 +1309,13 @@ def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[di
             actual = "home"
         elif features["home_goals"] < features["away_goals"]:
             actual = "away"
+        kickoff = fixture.get("fixture", {}).get("date") or ""
+        myt_fields = fixture_myt_fields(fixture)
         rows.append(
             {
                 "fixture_id": features["fixture_id"],
+                "kickoff_utc": kickoff,
+                "myt_datetime": myt_fields.get("myt_datetime", ""),
                 "match": f"{features['home_team']} vs {features['away_team']}",
                 "score": f"{features['home_goals']}-{features['away_goals']}",
                 "predicted": predicted,
@@ -976,7 +1324,100 @@ def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[di
                 "confidence": percentage(prediction["model_confidence"]),
             }
         )
-    return rows
+    return running_accuracy_rows(rows)
+
+
+def running_accuracy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("kickoff_utc") or ""),
+            str(row.get("match") or ""),
+            int(row.get("fixture_id") or 0),
+        ),
+    )
+    correct_count = 0
+    for index, row in enumerate(sorted_rows, start=1):
+        if bool(row.get("correct")):
+            correct_count += 1
+        running_accuracy = correct_count / index
+        row["match_number"] = index
+        row["cumulative_correct"] = correct_count
+        row["running_accuracy"] = running_accuracy
+        row["running_accuracy_display"] = percentage(running_accuracy)
+    return sorted_rows
+
+
+def api_football_predicted_outcome(api_prediction: dict[str, Any]) -> str | None:
+    if not api_prediction.get("available"):
+        return None
+    probabilities = {
+        "home": api_prediction.get("home_probability"),
+        "draw": api_prediction.get("draw_probability"),
+        "away": api_prediction.get("away_probability"),
+    }
+    usable_probabilities = {
+        outcome: float(value)
+        for outcome, value in probabilities.items()
+        if value is not None
+    }
+    if not usable_probabilities:
+        return None
+    return max(usable_probabilities, key=usable_probabilities.get)
+
+
+def api_football_running_accuracy_rows(
+    rows: list[dict[str, Any]],
+    api_predictions_by_fixture: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    evaluated_count = 0
+    correct_count = 0
+    enriched_rows = [dict(row) for row in rows]
+    for row in enriched_rows:
+        fixture_id = int(row.get("fixture_id") or 0)
+        api_prediction = api_predictions_by_fixture.get(fixture_id, {})
+        api_predicted = api_football_predicted_outcome(api_prediction)
+        row["api_football_status"] = str(api_prediction.get("status") or "missing")
+        row["api_football_predicted"] = api_predicted or "-"
+        row["api_football_correct"] = None
+        row["api_football_running_accuracy"] = None
+        row["api_football_running_accuracy_display"] = "-"
+        if api_predicted is None:
+            continue
+
+        evaluated_count += 1
+        api_correct = api_predicted == row.get("actual")
+        if api_correct:
+            correct_count += 1
+        api_running_accuracy = correct_count / evaluated_count
+        row["api_football_correct"] = api_correct
+        row["api_football_evaluated_match_number"] = evaluated_count
+        row["api_football_cumulative_correct"] = correct_count
+        row["api_football_running_accuracy"] = api_running_accuracy
+        row["api_football_running_accuracy_display"] = percentage(api_running_accuracy)
+    return enriched_rows
+
+
+def api_football_accuracy_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated_rows = [
+        row
+        for row in rows
+        if row.get("api_football_correct") is not None
+    ]
+    if not evaluated_rows:
+        return {
+            "evaluated": 0,
+            "correct": 0,
+            "accuracy": None,
+            "unavailable": len(rows),
+        }
+    correct = sum(1 for row in evaluated_rows if row["api_football_correct"])
+    return {
+        "evaluated": len(evaluated_rows),
+        "correct": correct,
+        "accuracy": correct / len(evaluated_rows),
+        "unavailable": len(rows) - len(evaluated_rows),
+    }
 
 
 def render_snapshot_list() -> None:
@@ -1142,6 +1583,13 @@ def render_prediction_dashboard(
         events=selected_events,
         ratings=ratings,
     )
+    result_banner = model_result_banner_data(
+        selected_fixture,
+        features,
+        prediction,
+        ratings,
+    )
+    api_prediction = fetch_api_football_prediction(features["fixture_id"])
     save_prediction_snapshot([prediction_snapshot_row(features, prediction)])
 
     tabs = st.tabs(
@@ -1149,6 +1597,7 @@ def render_prediction_dashboard(
             "Schedule",
             "Predictions",
             "Model Breakdown",
+            "Model Comparison",
             "Backtest",
             "Snapshots",
         ]
@@ -1165,6 +1614,7 @@ def render_prediction_dashboard(
     with tabs[1]:
         st.subheader("Predictions")
         render_selected_header(features)
+        render_model_result_banner(result_banner)
         render_probability_cards(probability_rows(prediction), "match outcome")
         st.markdown("#### Next goal")
         if prediction["prediction_mode"] == "prematch":
@@ -1186,17 +1636,100 @@ def render_prediction_dashboard(
         )
 
     with tabs[3]:
+        st.subheader("Model Comparison")
+        render_model_comparison(features, prediction, api_prediction)
+
+    with tabs[4]:
         st.subheader("Backtest")
         rows = backtest_rows(fixtures, ratings)
         if rows:
+            include_api_benchmark = st.checkbox(
+                "Include API-Football prediction benchmark",
+                value=True,
+                help=(
+                    "Uses cached /predictions calls for completed fixtures. "
+                    "Unavailable fixtures are skipped from API-Football accuracy."
+                ),
+            )
+            if include_api_benchmark:
+                api_predictions_by_fixture = {
+                    int(row["fixture_id"]): fetch_api_football_prediction(
+                        int(row["fixture_id"])
+                    )
+                    for row in rows
+                }
+                rows = api_football_running_accuracy_rows(
+                    rows,
+                    api_predictions_by_fixture,
+                )
             frame = pd.DataFrame(rows)
-            st.metric("Completed fixtures", len(frame))
-            st.metric("Simple hit rate", percentage(float(frame["correct"].mean())))
-            st.dataframe(frame, width="stretch", hide_index=True)
+            latest = frame.iloc[-1]
+            metric_cols = st.columns(5 if include_api_benchmark else 3)
+            metric_cols[0].metric("Completed fixtures", len(frame))
+            metric_cols[1].metric(
+                "Our running accuracy",
+                percentage(float(latest["running_accuracy"])),
+            )
+            metric_cols[2].metric(
+                "Our correct predictions",
+                f"{int(latest['cumulative_correct'])}/{len(frame)}",
+            )
+            if include_api_benchmark:
+                api_summary = api_football_accuracy_summary(rows)
+                metric_cols[3].metric(
+                    "API-Football accuracy",
+                    optional_percentage(api_summary["accuracy"]),
+                )
+                api_correct_display = (
+                    f"{api_summary['correct']}/{api_summary['evaluated']}"
+                    if api_summary["evaluated"]
+                    else "unavailable"
+                )
+                metric_cols[4].metric("API-Football correct", api_correct_display)
+                if api_summary["unavailable"]:
+                    st.warning(
+                        "API-Football predictions were unavailable for "
+                        f"{api_summary['unavailable']} completed fixture(s)."
+                    )
+            st.caption(
+                "Running accuracy is calculated from completed fixtures in kickoff "
+                "order. Our model uses the pre-match top pick; API-Football uses "
+                "the highest available home/draw/away prediction percentage."
+            )
+            chart_columns = ["match_number", "running_accuracy"]
+            if include_api_benchmark and "api_football_running_accuracy" in frame.columns:
+                chart_columns.append("api_football_running_accuracy")
+            chart_frame = frame[chart_columns].rename(
+                columns={
+                    "running_accuracy": "our_model",
+                    "api_football_running_accuracy": "api_football",
+                }
+            )
+            st.line_chart(chart_frame.set_index("match_number"))
+            display_columns = [
+                "match_number",
+                "myt_datetime",
+                "match",
+                "score",
+                "predicted",
+                "actual",
+                "correct",
+                "running_accuracy_display",
+                "api_football_status",
+                "api_football_predicted",
+                "api_football_correct",
+                "api_football_running_accuracy_display",
+                "confidence",
+            ]
+            st.dataframe(
+                frame[[column for column in display_columns if column in frame.columns]],
+                width="stretch",
+                hide_index=True,
+            )
         else:
             st.info("No completed fixtures are available for backtesting yet.")
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Snapshots")
         render_snapshot_list()
 
@@ -1318,6 +1851,7 @@ def main() -> None:
         fetch_live_prediction_dataset.clear()
         fetch_world_cup_fixtures.clear()
         fetch_fixture_detail.clear()
+        fetch_api_football_prediction.clear()
 
     try:
         if view_scope == "World Cup season":

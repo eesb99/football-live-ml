@@ -78,3 +78,7 @@ class ApiFootballClient:
     def get_fixture_statistics(self, fixture_id: int) -> list[dict[str, Any]]:
         payload = self._get("/fixtures/statistics", params={"fixture": fixture_id})
         return payload.get("response") or []
+
+    def get_fixture_predictions(self, fixture_id: int) -> list[dict[str, Any]]:
+        payload = self._get("/predictions", params={"fixture": fixture_id})
+        return payload.get("response") or []

@@ -2,14 +2,23 @@ from src.api_client import ApiFootballError
 from src.ratings import TeamRating
 
 from app.streamlit_app import (
+    api_football_accuracy_summary,
     arrow_safe_dataframe,
+    api_football_advice_rows,
+    api_football_predicted_outcome,
+    api_football_running_accuracy_rows,
+    comparison_status_rows,
     data_source_rows,
     elo_prior_rows,
     expected_goal_rows,
     extracted_feature_rows,
     fixture_events_display_rows,
     fixture_statistics_display_rows,
+    model_comparison_rows,
+    model_result_banner_data,
+    probability_difference,
     probability_rows,
+    running_accuracy_rows,
     should_try_free_plan_fallback,
     strength_component_rows,
 )
@@ -50,6 +59,17 @@ def fixture():
         },
         "goals": {"home": 1, "away": 0},
     }
+
+
+def final_fixture(home_goals=1, away_goals=0):
+    match = fixture()
+    match["fixture"]["status"] = {
+        "elapsed": 90,
+        "long": "Match Finished",
+        "short": "FT",
+    }
+    match["goals"] = {"home": home_goals, "away": away_goals}
+    return match
 
 
 def features():
@@ -106,6 +126,17 @@ def features():
     }
 
 
+def final_features(home_goals=1, away_goals=0):
+    data = features()
+    data["status"] = "Match Finished"
+    data["status_short"] = "FT"
+    data["minute"] = 90
+    data["home_goals"] = home_goals
+    data["away_goals"] = away_goals
+    data["score_difference"] = home_goals - away_goals
+    return data
+
+
 def prediction():
     return {
         "prediction_mode": "live",
@@ -140,12 +171,230 @@ def prediction():
     }
 
 
+def final_prediction():
+    data = prediction()
+    data["prediction_mode"] = "final"
+    data["home_win_probability"] = 1.0
+    data["draw_probability"] = 0.0
+    data["away_win_probability"] = 0.0
+    data["model_confidence"] = 1.0
+    return data
+
+
 def test_probability_rows_group_outcome_and_next_goal_metrics():
     rows = probability_rows(prediction())
 
     assert [row["metric"] for row in rows[:3]] == ["Home win", "Draw", "Away win"]
     assert {row["group"] for row in rows} == {"match outcome", "next goal"}
     assert rows[0]["display"] == "68.0%"
+
+
+def test_model_result_banner_data_marks_completed_model_win():
+    banner = model_result_banner_data(
+        final_fixture(1, 0),
+        final_features(1, 0),
+        final_prediction(),
+        ratings={
+            10: TeamRating(team_id=10, team_name="Alpha", rating=1700, matches_played=8),
+            20: TeamRating(team_id=20, team_name="Beta", rating=1400, matches_played=8),
+        },
+    )
+
+    assert banner["status"] == "win"
+    assert banner["correct"] is True
+    assert banner["predicted"] == "home"
+    assert banner["actual"] == "home"
+    assert banner["basis"] == "pre-match prior"
+    assert "Our model WIN" == banner["headline"]
+
+
+def test_model_result_banner_data_marks_completed_model_loss():
+    banner = model_result_banner_data(
+        final_fixture(1, 0),
+        final_features(1, 0),
+        final_prediction(),
+        ratings={
+            10: TeamRating(team_id=10, team_name="Alpha", rating=1300, matches_played=8),
+            20: TeamRating(team_id=20, team_name="Beta", rating=1750, matches_played=8),
+        },
+    )
+
+    assert banner["status"] == "loss"
+    assert banner["correct"] is False
+    assert banner["predicted"] == "away"
+    assert banner["actual"] == "home"
+    assert banner["basis"] == "pre-match prior"
+    assert "Our model LOSS" == banner["headline"]
+
+
+def test_model_result_banner_data_is_pending_for_unfinished_match():
+    banner = model_result_banner_data(
+        fixture(),
+        features(),
+        prediction(),
+        ratings={},
+    )
+
+    assert banner["status"] == "pending"
+    assert banner["correct"] is None
+    assert banner["actual"] is None
+    assert banner["basis"] == "live"
+
+
+def test_running_accuracy_rows_sort_and_add_cumulative_accuracy():
+    rows = running_accuracy_rows(
+        [
+            {
+                "fixture_id": 3,
+                "kickoff_utc": "2026-06-14T10:00:00+00:00",
+                "match": "Gamma vs Delta",
+                "correct": True,
+            },
+            {
+                "fixture_id": 1,
+                "kickoff_utc": "2026-06-12T10:00:00+00:00",
+                "match": "Alpha vs Beta",
+                "correct": True,
+            },
+            {
+                "fixture_id": 2,
+                "kickoff_utc": "2026-06-13T10:00:00+00:00",
+                "match": "Alpha vs Gamma",
+                "correct": False,
+            },
+        ]
+    )
+
+    assert [row["fixture_id"] for row in rows] == [1, 2, 3]
+    assert [row["match_number"] for row in rows] == [1, 2, 3]
+    assert [row["cumulative_correct"] for row in rows] == [1, 1, 2]
+    assert rows[0]["running_accuracy_display"] == "100.0%"
+    assert rows[1]["running_accuracy_display"] == "50.0%"
+    assert rows[2]["running_accuracy_display"] == "66.7%"
+
+
+def test_api_football_predicted_outcome_uses_highest_available_probability():
+    assert api_football_predicted_outcome(api_prediction()) == "home"
+    unavailable = api_prediction()
+    unavailable["available"] = False
+
+    assert api_football_predicted_outcome(unavailable) is None
+
+
+def test_api_football_running_accuracy_rows_skip_unavailable_predictions():
+    rows = running_accuracy_rows(
+        [
+            {
+                "fixture_id": 1,
+                "kickoff_utc": "2026-06-12T10:00:00+00:00",
+                "match": "Alpha vs Beta",
+                "actual": "home",
+                "correct": True,
+            },
+            {
+                "fixture_id": 2,
+                "kickoff_utc": "2026-06-13T10:00:00+00:00",
+                "match": "Gamma vs Delta",
+                "actual": "away",
+                "correct": False,
+            },
+        ]
+    )
+    home_prediction = api_prediction()
+    away_prediction = api_prediction()
+    away_prediction["home_probability"] = 0.2
+    away_prediction["draw_probability"] = 0.1
+    away_prediction["away_probability"] = 0.7
+
+    enriched = api_football_running_accuracy_rows(
+        rows,
+        {
+            1: home_prediction,
+            2: away_prediction,
+        },
+    )
+
+    assert enriched[0]["api_football_predicted"] == "home"
+    assert enriched[0]["api_football_correct"] is True
+    assert enriched[0]["api_football_running_accuracy_display"] == "100.0%"
+    assert enriched[1]["api_football_predicted"] == "away"
+    assert enriched[1]["api_football_correct"] is True
+    assert enriched[1]["api_football_running_accuracy_display"] == "100.0%"
+
+
+def test_api_football_accuracy_summary_counts_available_rows_only():
+    rows = [
+        {"api_football_correct": True},
+        {"api_football_correct": False},
+        {"api_football_correct": None},
+    ]
+    summary = api_football_accuracy_summary(rows)
+
+    assert summary == {
+        "evaluated": 2,
+        "correct": 1,
+        "accuracy": 0.5,
+        "unavailable": 1,
+    }
+
+
+def api_prediction():
+    return {
+        "available": True,
+        "status": "available",
+        "endpoint": "/predictions?fixture=9001",
+        "last_error": "",
+        "home_probability": 0.55,
+        "draw_probability": 0.25,
+        "away_probability": 0.20,
+        "home_display": "55.0%",
+        "draw_display": "25.0%",
+        "away_display": "20.0%",
+        "advice": "Double chance : Alpha or draw",
+        "winner_name": "Alpha",
+        "winner_comment": "Win or draw",
+        "win_or_draw": True,
+        "under_over": "-3.5",
+        "goals_home": "-2.5",
+        "goals_away": "-1.5",
+    }
+
+
+def test_probability_difference_formats_percentage_points():
+    assert probability_difference(0.68, 0.55) == "+13.0 pp"
+    assert probability_difference(0.21, 0.25) == "-4.0 pp"
+    assert probability_difference(0.21, None) == "-"
+
+
+def test_model_comparison_rows_show_our_model_and_api_football():
+    rows = model_comparison_rows(prediction(), api_prediction())
+    metrics = {row["metric"]: row for row in rows}
+
+    assert metrics["Home win"]["our_model"] == "68.0%"
+    assert metrics["Home win"]["api_football"] == "55.0%"
+    assert metrics["Home win"]["difference"] == "+13.0 pp"
+    assert metrics["Home scores next"]["api_football"] == "-"
+
+
+def test_comparison_status_rows_show_endpoint_and_availability():
+    rows = comparison_status_rows(api_prediction())
+
+    assert rows[0] == {
+        "source": "API-Football prediction endpoint",
+        "status": "available",
+        "detail": "/predictions?fixture=9001",
+    }
+    assert rows[1]["status"] == "available"
+
+
+def test_api_football_advice_rows_show_prediction_details():
+    rows = api_football_advice_rows(api_prediction())
+    values = {row["field"]: row["value"] for row in rows}
+
+    assert values["Advice"] == "Double chance : Alpha or draw"
+    assert values["Winner"] == "Alpha"
+    assert values["Win or draw"] == "true"
+    assert values["Predicted goals"] == "-2.5 - -1.5"
 
 
 def test_elo_prior_rows_include_ratings_and_prematch_probabilities():

@@ -14,6 +14,7 @@ The dashboard supports individual-budget World Cup prediction workflows:
 - live prediction from match events and statistics
 - model-driver explanations
 - model source/status display
+- API-Football prediction endpoint comparison
 - proxy xG fallback when real xG is unavailable
 - expected remaining goals
 - model confidence
@@ -70,6 +71,7 @@ For each selected or displayed live match, it can also fetch:
 
 - `/fixtures/events?fixture={fixture_id}`
 - `/fixtures/statistics?fixture={fixture_id}`
+- `/predictions?fixture={fixture_id}` for optional benchmark comparison
 
 ## World Cup Focus
 
@@ -88,9 +90,10 @@ If API-Football rejects the selected season on the current plan, the app automat
 Dashboard tabs:
 
 - **Schedule**: calendar and match board grouped by Malaysia Time (MYT, UTC+8).
-- **Predictions**: home/draw/away probabilities, next-goal outputs, and outcome bars.
+- **Predictions**: home/draw/away probabilities, next-goal outputs, outcome bars, and a win/loss/pending result banner when an actual final result is available.
 - **Model Breakdown**: model mode, data source availability, Elo prior, extracted features, proxy/real xG status, live strength components, Poisson expected goals, and explanation drivers.
-- **Backtest**: basic completed-fixture prediction check.
+- **Model Comparison**: side-by-side benchmark view comparing `Our v2 rules model` with `API-Football prediction` when the API-Football predictions endpoint is available.
+- **Backtest**: completed-fixture prediction check with cumulative running accuracy for our model and optional API-Football prediction benchmark accuracy.
 - **Snapshots**: latest local prediction snapshot files.
 
 ## Project Structure
@@ -105,6 +108,7 @@ football-live-ml/
     config.py
     adapters.py
     api_client.py
+    external_predictions.py
     features.py
     model.py
     predictor.py
@@ -184,6 +188,8 @@ These interfaces are fallback-safe. With no paid provider configured, the dashbo
 `src/model.py` still includes a placeholder adapter for a future scikit-learn model.
 
 `src/predictor.py` is the main dashboard-facing prediction API. It returns prediction mode, probabilities, confidence, expected goals, and readable model drivers.
+
+`src/external_predictions.py` normalizes optional API-Football prediction endpoint payloads for comparison only. These predictions are not used in the local `world-cup-rules-v2` calculation.
 
 ## Testing
 
