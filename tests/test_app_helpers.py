@@ -2,8 +2,6 @@ from src.api_client import ApiFootballError
 from src.ratings import TeamRating
 
 from app.streamlit_app import (
-    admin_refresh_authorized,
-    admin_refresh_requested,
     api_football_accuracy_summary,
     arrow_safe_dataframe,
     api_football_advice_rows,
@@ -17,12 +15,15 @@ from app.streamlit_app import (
     fixture_events_display_rows,
     fixture_statistics_display_rows,
     fetch_api_football_prediction,
+    load_public_odds_refresh_state,
     model_comparison_rows,
     model_result_banner_data,
-    public_admin_refresh_summary,
+    public_odds_refresh_remaining_seconds,
+    public_odds_refresh_summary,
     probability_difference,
     probability_rows,
     running_accuracy_rows,
+    save_public_odds_refresh_state,
     should_try_free_plan_fallback,
     sportmonks_audit_check_rows,
     sportmonks_mapping_metric_rows,
@@ -31,23 +32,8 @@ from app.streamlit_app import (
 )
 
 
-def test_admin_refresh_requested_requires_admin_query_flag():
-    assert admin_refresh_requested({"admin": "1"}) is True
-    assert admin_refresh_requested({"admin": "true"}) is True
-    assert admin_refresh_requested({"admin": ["yes"]}) is True
-    assert admin_refresh_requested({"admin": "0"}) is False
-    assert admin_refresh_requested({}) is False
-
-
-def test_admin_refresh_authorized_requires_matching_nonempty_token():
-    assert admin_refresh_authorized("secret-token", "secret-token") is True
-    assert admin_refresh_authorized("wrong-token", "secret-token") is False
-    assert admin_refresh_authorized("", "secret-token") is False
-    assert admin_refresh_authorized("secret-token", "") is False
-
-
-def test_public_admin_refresh_summary_excludes_paths_and_fixture_ids():
-    summary = public_admin_refresh_summary(
+def test_public_odds_refresh_summary_excludes_paths_and_fixture_ids():
+    summary = public_odds_refresh_summary(
         {
             "season_id": 26618,
             "fixtures_considered": 3,
@@ -67,6 +53,49 @@ def test_public_admin_refresh_summary_excludes_paths_and_fixture_ids():
         "empty_odds": 1,
         "errors": 0,
     }
+
+
+def test_public_odds_refresh_state_round_trips_sanitized_summary(tmp_path):
+    path = tmp_path / "refresh_state.json"
+    save_public_odds_refresh_state(
+        {
+            "season_id": 26618,
+            "fixtures_considered": 3,
+            "odds_cached": 2,
+            "empty_odds": 1,
+            "errors": 0,
+            "cached_paths": ["/tmp/private/path.json"],
+        },
+        now_epoch=1000,
+        path=path,
+    )
+
+    state = load_public_odds_refresh_state(path)
+
+    assert state["last_refresh_epoch"] == 1000
+    assert state["summary"] == {
+        "season_id": 26618,
+        "fixtures_considered": 3,
+        "odds_cached": 2,
+        "empty_odds": 1,
+        "errors": 0,
+    }
+    assert "cached_paths" not in state["summary"]
+
+
+def test_public_odds_refresh_remaining_seconds_enforces_cooldown():
+    state = {"last_refresh_epoch": 1000}
+
+    assert public_odds_refresh_remaining_seconds(
+        state,
+        now_epoch=1100,
+        cooldown_seconds=300,
+    ) == 200
+    assert public_odds_refresh_remaining_seconds(
+        state,
+        now_epoch=1400,
+        cooldown_seconds=300,
+    ) == 0
 
 
 def test_should_try_free_plan_fallback_detects_api_football_plan_error():
