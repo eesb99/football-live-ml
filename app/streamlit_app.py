@@ -66,11 +66,13 @@ from src.storage import (
     save_api_prediction_cache,
     save_prediction_snapshot,
     save_snapshot,
+    save_sportmonks_fixtures_cache,
 )
 from src.team_priors import TEAM_PRIORS_PATH, load_team_priors, prior_schema_rows
-from src.sportmonks_client import SportMonksError
+from src.sportmonks_client import SportMonksClient, SportMonksError, sportmonks_records
 from src.sportmonks_enrichment import (
-    fetch_and_cache_world_cup_enrichment,
+    WORLD_CUP_2026_SPORTMONKS_SEASON_ID,
+    fetch_paginated_fixtures,
     load_latest_world_cup_enrichment,
     sportmonks_cache_status_rows,
     sportmonks_candidate_enrichment_by_api_fixture,
@@ -250,6 +252,35 @@ def public_odds_refresh_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "errors",
     ]
     return {key: summary.get(key) for key in public_keys}
+
+
+def seed_sportmonks_fixture_cache_for_public_refresh(
+    settings,
+    *,
+    season_id: int = WORLD_CUP_2026_SPORTMONKS_SEASON_ID,
+) -> dict[str, Any]:
+    client = SportMonksClient(settings)
+    fixtures_payload = fetch_paginated_fixtures(
+        client,
+        season_id,
+        max_pages=2,
+        per_page=100,
+    )
+    save_sportmonks_fixtures_cache(
+        fixtures_payload,
+        season_id,
+        token=settings.sportmonks_api_token,
+        metadata={
+            "refresh_source": "public_odds_refresh",
+            "max_pages": 2,
+            "per_page": 100,
+        },
+    )
+    return {
+        "season_id": int(season_id),
+        "fixtures_cached": len(sportmonks_records(fixtures_payload)),
+        "fixture_details_cached": 0,
+    }
 
 
 def load_public_odds_refresh_state(
@@ -1607,9 +1638,8 @@ def render_public_odds_refresh_panel() -> None:
 
     try:
         settings = sportmonks_refresh_settings()
-        enrichment_summary = fetch_and_cache_world_cup_enrichment(
-            settings=settings,
-            max_detail_fixtures=PUBLIC_ODDS_REFRESH_MAX_FIXTURES,
+        fixture_seed_summary = seed_sportmonks_fixture_cache_for_public_refresh(
+            settings,
         )
         summary = capture_pre_kickoff_odds(
             settings=settings,
@@ -1617,8 +1647,8 @@ def render_public_odds_refresh_panel() -> None:
         )
         summary.update(
             {
-                "fixtures_cached": enrichment_summary.get("fixtures_cached"),
-                "fixture_details_cached": enrichment_summary.get(
+                "fixtures_cached": fixture_seed_summary.get("fixtures_cached"),
+                "fixture_details_cached": fixture_seed_summary.get(
                     "fixture_details_cached"
                 ),
             }
