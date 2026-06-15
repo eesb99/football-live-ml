@@ -19,3 +19,43 @@
 - Latest evidence after MYT update: `python3 -m pytest tests` passed with 16 tests; compileall and Streamlit AppTest passed.
 - Added API-Football free-plan season fallback so `season=2026` rejection can fall back to accessible seasons `2022`, `2023`, and `2024`.
 - Latest evidence after fallback update: `python3 -m pytest tests` passed with 18 tests; compileall and Streamlit AppTest passed.
+- Added fair walk-forward benchmark path and API-Football prediction cache. Headline backtest now predicts each completed fixture before updating ratings from that result, compares API-Football only on shared available fixtures, and reports Brier score plus log loss.
+- Latest evidence after fair benchmark update: `python3 -m pytest tests` passed with 57 tests; compileall and Streamlit AppTest passed.
+- Added model-improvement diagnostics after the first fair benchmark showed API-Football ahead on the 8-match sample. Changes were conservative: probability-margin confidence, close-match draw calibration, prior-fixture-only form state, and Backtest miss/API-disagreement diagnostics.
+- Latest evidence after model-improvement diagnostics update: `python3 -m pytest tests` passed with 60 tests; compileall and Streamlit AppTest passed.
+- Added draw-specific diagnostics after the benchmark showed 3 draw misses. Backtest rows now expose draw risk label, expected-goal gap, total expected goals, rating/form gap, top-vs-draw margin, draw rank, our/API draw miss flags, and draw summary metrics.
+- Latest evidence after draw diagnostics update: `python3 -m pytest tests` passed with 64 tests; compileall and Streamlit AppTest passed.
+- Added SportMonks World Cup All-in audit foundation after subscription. The app now supports optional `SPORTMONKS_API_TOKEN`, a redacted SportMonks client, sanitized audit files under `data/sportmonks/audits/`, fixture mapping by kickoff/team names, and a Provider Status dashboard tab.
+- Latest live SportMonks audit evidence: `python3 -m src.sportmonks_audit` saved `data/sportmonks/audits/2026-06-14_2227_sportmonks_access_audit.json`; World Cup league `732`, World Cup 2026 season `26618`, selected fixture `19606945`; accessible categories were leagues, World Cup search, seasons, World Cup 2026 fixtures, fixture detail, expected goals, and news; SportMonks predictions, pre-match odds, and match facts were valid but empty for the selected future fixture; error categories were empty.
+- Latest SportMonks safety evidence: audit secret scan passed, generated audit JSON is ignored by Git, `python3 -m pytest tests` passed with 86 tests, compileall passed, Streamlit AppTest printed `streamlit_app_executed`, and `http://localhost:8501` returned `200 text/html`.
+- Added SportMonks enrichment cache and candidate benchmark layer after World Cup All-in subscription. The app can now read sanitized local SportMonks fixture/detail/xG/news caches, show Provider Status mapping coverage, and run a separate candidate experiment in Backtest.
+- Non-leak rule: SportMonks xG from `/expected/fixtures` is treated as post-match-only unless cache metadata proves it was captured before kickoff, so it is blocked from pre-match walk-forward scoring by default.
+- Latest targeted implementation evidence: `python3 -m pytest tests/test_storage.py tests/test_sportmonks_enrichment.py tests/test_benchmark.py tests/test_app_helpers.py` passed with 44 tests.
+- Latest live cache evidence: `python3 -m src.sportmonks_enrichment` cached 50 fixtures, 25 fixture-detail files, 50 expected-goals records, and 6 news records for SportMonks season `26618`.
+- Current API-Football season mapping evidence: 72 API-Football fixtures, 8 completed fixtures, 50 cached SportMonks fixtures, 17 exact API-to-SportMonks mappings, 17 mapped fixture-detail caches, 4 mapped xG pairs, and 2 mapped news fixtures. SportMonks candidate had 4 mapped completed fixtures but 0 eligible non-leaky rows, so the headline recommendation remains `keep_current_model`.
+- Latest final verification evidence: `python3 -m pytest tests` passed with 94 tests; `python3 -m compileall src app tests` passed; Streamlit AppTest printed `streamlit_app_executed_with_sportmonks_cache`; live SportMonks audit saved `data/sportmonks/audits/2026-06-14_2300_sportmonks_access_audit.json`; leak scan passed across 63 SportMonks JSON files; `git check-ignore` confirmed generated fixture, xG, and news JSON files are ignored.
+- Added market-intelligence layer for professional usefulness without betting-advice output. `python3 -m src.market_intelligence capture` captures sanitized pre-kickoff SportMonks full-time-result odds snapshots under `data/sportmonks/odds/`.
+- Market logic converts complete bookmaker home/draw/away triplets into no-vig implied probabilities, compares model probability to market probability, computes expected value at best available decimal price, and tracks CLV once at least two pre-kickoff snapshots exist.
+- Paper-trade candidate flags are blocked unless the benchmark gate passes through enough Brier score/log-loss evidence. Current small-sample benchmark should continue to block flags until model quality is proven.
+- Latest market capture evidence: `python3 -m src.market_intelligence capture --max-fixtures 8` cached 8 pre-kickoff odds files with 0 empty fixtures and 0 errors; leak scan passed across 71 SportMonks JSON files; `git check-ignore` confirmed the generated odds JSON is ignored.
+- Latest market gate evidence: 6 fixtures had pre-kickoff market rows, 0 paper-trade candidates were flagged, and all 6 market rows were blocked by the benchmark gate. This is expected until enough Brier/log-loss evidence exists.
+
+## 2026-06-15
+
+- Implemented World Cup venue context after the first 8 completed-match benchmark showed nominal-home bias and 3/3 draw misses. Neutral World Cup fixtures now remove the standard home-advantage Elo boost; Mexico/USA/Canada home fixtures keep host advantage when the venue city is in the matching host country.
+- Added stronger cold-start draw-risk calibration only for close neutral World Cup fixtures with little prior team history. This prevents broad live/league changes while making neutral, low-information matches less home-biased.
+- Completed 2026 World Cup backtest moved in the right direction versus the previous baseline:
+  - Accuracy stayed `4/8` (`50.0%`).
+  - Brier score improved from `0.622` to `0.614`.
+  - Log loss improved from `1.033` to `1.020`.
+  - Draw misses improved from `3` to `1`.
+  - API-Football still leads with `5/8`, Brier `0.604`, and log loss `0.953`.
+- Market safety remains preserved: benchmark gate is still blocked with `8/10` shared evaluated rows, `0` paper-trade candidates, `13` fixtures with market rows, and `7` CLV-tracked rows.
+- Verification evidence: `python3 -m pytest tests` passed with 104 tests; `python3 -m compileall src app tests` passed; Streamlit AppTest printed `streamlit_app_executed`.
+- Next best action: keep collecting completed fixtures and odds snapshots; do not promote betting signals until the benchmark gate has enough rows and Brier/log-loss improvement versus API-Football is proven.
+- After the completed sample expanded to 12 fixtures, the hard cold-start neutral draw floor became too aggressive. Baseline before repair was our model `5/12` (`41.7%`), Brier `0.620`, log loss `1.023`; API-Football was `8/12` (`66.7%`), Brier `0.611`, log loss `0.970`.
+- Replaced the hard `42%` cold-start neutral draw floor with a soft material-draw target capped below the leading win probability. This keeps draw probability meaningful on low-information neutral fixtures without forcing draw as the top pick.
+- Post-repair benchmark on the same 12 completed fixtures: our model `7/12` (`58.3%`), Brier `0.609`, log loss `1.012`; API-Football remained `8/12` (`66.7%`), Brier `0.611`, log loss `0.970`. Diagnostic counts moved to `both_correct=7`, `both_wrong=4`, `api_only_wins=1`, `our_only_wins=0`, `draw_misses=4`, `away_underdog_misses=1`.
+- Benchmark gate remains blocked with reason `brier_log_loss_not_better` because our log loss still trails API-Football even though Brier is slightly better.
+- Verification evidence after cold-start neutral draw repair: `python3 -m pytest tests/test_predictor.py tests/test_benchmark.py tests/test_app_helpers.py` passed with 51 tests; `python3 -m pytest tests` passed with 105 tests; `python3 -m compileall src app tests` passed; Streamlit AppTest printed `streamlit_app_executed`.
+- Next best action: investigate independent, non-leaky pre-tournament team-strength priors or richer pre-match context to improve log loss; do not blend API-Football predictions into the headline model and do not promote market flags while the benchmark gate is blocked.

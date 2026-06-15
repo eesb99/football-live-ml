@@ -13,3 +13,7 @@ data/predictions/*.csv
 !data/predictions/.gitkeep
 data/ratings/*.csv
 !data/ratings/.gitkeep
+data/api_predictions/*.json
+!data/api_predictions/.gitkeep
+data/sportmonks/**/*.json
+!data/sportmonks/**/.gitkeep

@@ -1,9 +1,11 @@
 import pandas as pd
 
 from src.adapters import PaidDataSnapshot
+from src.competition_context import effective_home_advantage_elo
 from src.features import build_match_features
 from src.predictor import (
     apply_paid_data_to_features,
+    calibrate_draw_probability,
     predict_fixture,
     prediction_snapshot_row,
 )
@@ -149,6 +151,68 @@ def test_prematch_prediction_prefers_stronger_team():
     assert prediction["model_drivers"]
 
 
+def test_prematch_confidence_reflects_probability_margin_and_rating_depth():
+    close_prediction = predict_fixture(fixture())
+    strong_prediction = predict_fixture(
+        fixture(),
+        ratings={
+            10: TeamRating(team_id=10, team_name="Alpha", rating=1900, matches_played=10),
+            20: TeamRating(team_id=20, team_name="Beta", rating=1250, matches_played=10),
+        },
+    )
+
+    assert strong_prediction["model_confidence"] > close_prediction["model_confidence"]
+    assert (
+        "Confidence reflects top probability"
+        in strong_prediction["model_driver_summary"]
+    )
+
+
+def test_draw_calibration_lifts_close_low_tempo_draw_and_normalizes():
+    base = (0.39, 0.28, 0.33)
+    calibrated = calibrate_draw_probability(
+        base,
+        1.15,
+        1.05,
+        rating_gap=35.0,
+        form_gap=0.05,
+    )
+
+    assert calibrated[1] > base[1]
+    assert abs(sum(calibrated) - 1.0) < 0.001
+
+
+def test_draw_calibration_keeps_cold_start_neutral_draw_material_but_not_forced_top():
+    base = (0.41, 0.31, 0.28)
+    calibrated = calibrate_draw_probability(
+        base,
+        1.30,
+        1.05,
+        rating_gap=0.0,
+        form_gap=0.0,
+        neutral_site=True,
+        home_matches_played=0,
+        away_matches_played=0,
+    )
+
+    assert calibrated[1] > base[1]
+    assert calibrated[1] < calibrated[0]
+    assert abs(sum(calibrated) - 1.0) < 0.001
+
+
+def test_draw_calibration_does_not_boost_clear_mismatch():
+    base = (0.65, 0.20, 0.15)
+    calibrated = calibrate_draw_probability(
+        base,
+        2.1,
+        0.8,
+        rating_gap=220.0,
+        form_gap=0.6,
+    )
+
+    assert calibrated == base
+
+
 def test_live_prediction_blends_prior_and_live_features():
     ratings = {
         10: TeamRating(team_id=10, team_name="Alpha", rating=1500, matches_played=4),
@@ -170,6 +234,35 @@ def test_live_prediction_blends_prior_and_live_features():
     assert prediction["odds_available"] is False
     assert "proxy xG" in prediction["model_driver_summary"]
     assert any("red cards" in driver for driver in prediction["model_drivers"])
+
+
+def test_neutral_world_cup_fixture_removes_home_advantage_and_lifts_draw():
+    neutral_fixture = fixture()
+    prediction = predict_fixture(neutral_fixture)
+
+    assert effective_home_advantage_elo(neutral_fixture, 60.0) == 0.0
+    assert prediction["draw_probability"] > prediction["away_win_probability"]
+    assert prediction["home_win_probability"] > prediction["draw_probability"]
+    assert (
+        "Neutral World Cup venue removes the standard home-advantage Elo boost"
+        in prediction["model_driver_summary"]
+    )
+
+
+def test_world_cup_host_fixture_keeps_host_home_advantage():
+    host_fixture = fixture()
+    host_fixture["teams"]["home"]["name"] = "Mexico"
+    host_fixture["fixture"]["venue"] = {
+        "id": 1069,
+        "name": "Estadio Azteca",
+        "city": "Mexico City",
+    }
+
+    prediction = predict_fixture(host_fixture)
+
+    assert effective_home_advantage_elo(host_fixture, 60.0) == 60.0
+    assert prediction["home_win_probability"] > prediction["draw_probability"]
+    assert "Home or host advantage adds 60 Elo points" in prediction["model_driver_summary"]
 
 
 def test_live_prediction_uses_paid_real_xg_when_available():

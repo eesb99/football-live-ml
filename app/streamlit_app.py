@@ -13,12 +13,29 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api_client import ApiFootballClient, ApiFootballError, ApiFootballRateLimitError
+from src.benchmark import (
+    api_football_predicted_outcome as benchmark_api_football_predicted_outcome,
+    benchmark_diagnostic_counts,
+    benchmark_diagnostic_rows,
+    draw_diagnostic_summary,
+    draw_miss_diagnostic_rows,
+    fair_api_comparison_rows,
+    fair_benchmark_summary,
+    sportmonks_candidate_rows,
+    sportmonks_candidate_summary,
+    walk_forward_backtest_rows,
+)
 from src.config import MissingApiKeyError, load_settings
 from src.external_predictions import (
     normalize_api_football_prediction,
     unavailable_prediction,
 )
 from src.features import build_live_match_table, build_match_features, is_live_status
+from src.market_intelligence import (
+    benchmark_market_gate,
+    market_edge_rows_for_fixtures,
+    market_edge_summary,
+)
 from src.predictor import predict_fixture, prediction_snapshot_row, prematch_prediction
 from src.ratings import (
     HOME_ADVANTAGE_ELO,
@@ -31,9 +48,19 @@ from src.ratings import (
 )
 from src.schedule import fixture_myt_fields
 from src.storage import (
+    load_api_prediction_cache,
+    load_latest_sportmonks_audit,
     list_prediction_snapshots,
+    save_api_prediction_cache,
     save_prediction_snapshot,
     save_snapshot,
+)
+from src.sportmonks_enrichment import (
+    load_latest_world_cup_enrichment,
+    sportmonks_cache_status_rows,
+    sportmonks_candidate_enrichment_by_api_fixture,
+    sportmonks_mapping_coverage_rows,
+    sportmonks_mapping_coverage_summary,
 )
 
 
@@ -145,18 +172,24 @@ def optional_percentage(value: Any) -> str:
     if value is None:
         return "-"
     try:
-        return percentage(float(value))
+        parsed = float(value)
     except (TypeError, ValueError):
         return "-"
+    if pd.isna(parsed):
+        return "-"
+    return percentage(parsed)
 
 
 def numeric_value(value: Any, decimals: int = 1, suffix: str = "") -> str:
     if value is None:
         return "-"
     try:
-        return f"{float(value):.{decimals}f}{suffix}"
+        parsed = float(value)
     except (TypeError, ValueError):
         return "-"
+    if pd.isna(parsed):
+        return "-"
+    return f"{parsed:.{decimals}f}{suffix}"
 
 
 def api_display_value(value: Any) -> str:
@@ -629,6 +662,149 @@ def data_source_rows(
     ]
 
 
+def sportmonks_provider_status_rows() -> list[dict[str, Any]]:
+    settings = load_settings(require_api_key=False)
+    latest_audit = load_latest_sportmonks_audit()
+    rows = [
+        {
+            "source": "SportMonks token",
+            "status": "present" if settings.sportmonks_api_token else "missing",
+            "detail": "SPORTMONKS_API_TOKEN configured"
+            if settings.sportmonks_api_token
+            else "SPORTMONKS_API_TOKEN not configured",
+        },
+        {
+            "source": "SportMonks base URL",
+            "status": "configured",
+            "detail": settings.sportmonks_base_url,
+        },
+    ]
+    if not latest_audit:
+        rows.append(
+            {
+                "source": "Last access audit",
+                "status": "missing",
+                "detail": "Run python3 -m src.sportmonks_audit",
+            }
+        )
+        return rows
+
+    summary = latest_audit.get("summary") or {}
+    metadata = summary.get("metadata") or {}
+    subscription = metadata.get("subscription") or {}
+    rate_limit = metadata.get("rate_limit") or {}
+    accessible = summary.get("accessible_categories") or []
+    world_cup_seasons = summary.get("world_cup_2026_season_ids") or []
+    rows.extend(
+        [
+            {
+                "source": "Last access audit",
+                "status": "available",
+                "detail": str(latest_audit.get("audit_file") or "-"),
+            },
+            {
+                "source": "Accessible categories",
+                "status": str(len(accessible)),
+                "detail": ", ".join(accessible) if accessible else "-",
+            },
+            {
+                "source": "World Cup 2026 season IDs",
+                "status": "found" if world_cup_seasons else "missing",
+                "detail": ", ".join(str(value) for value in world_cup_seasons) or "-",
+            },
+            {
+                "source": "Subscription metadata",
+                "status": "available" if subscription else "not returned",
+                "detail": json.dumps(subscription, sort_keys=True)[:240]
+                if subscription
+                else "-",
+            },
+            {
+                "source": "Rate-limit metadata",
+                "status": "available" if rate_limit else "not returned",
+                "detail": json.dumps(rate_limit, sort_keys=True)[:240]
+                if rate_limit
+                else "-",
+            },
+        ]
+    )
+    return rows
+
+
+def sportmonks_audit_check_rows(
+    audit: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    audit = audit or load_latest_sportmonks_audit()
+    if not audit:
+        return []
+    rows = []
+    for name, check in (audit.get("checks") or {}).items():
+        detail = check.get("error") or check.get("reason") or check.get("endpoint") or ""
+        rows.append(
+            {
+                "category": name,
+                "status": str(check.get("status") or "-"),
+                "available": bool(check.get("available")),
+                "records": int(check.get("record_count") or 0),
+                "detail": str(detail)[:240],
+            }
+        )
+    return rows
+
+
+def sportmonks_mapping_metric_rows(
+    coverage_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summary = sportmonks_mapping_coverage_summary(coverage_rows)
+    return [
+        {
+            "metric": "API-Football fixtures",
+            "value": summary["api_fixtures"],
+            "detail": "Fixture rows currently shown by API-Football",
+        },
+        {
+            "metric": "Mapped to SportMonks",
+            "value": summary["mapped"],
+            "detail": optional_percentage(summary["mapping_rate"]),
+        },
+        {
+            "metric": "Exact mappings",
+            "value": summary["exact"],
+            "detail": "Kickoff and teams match strongly",
+        },
+        {
+            "metric": "Likely mappings",
+            "value": summary["likely"],
+            "detail": "Good but not exact team/name match",
+        },
+        {
+            "metric": "Ambiguous mappings",
+            "value": summary["ambiguous"],
+            "detail": "Needs manual review before use",
+        },
+        {
+            "metric": "No match",
+            "value": summary["no_match"],
+            "detail": "No safe SportMonks fixture mapping",
+        },
+        {
+            "metric": "Detail cache",
+            "value": summary["detail_available"],
+            "detail": "Mapped fixtures with cached detail",
+        },
+        {
+            "metric": "xG pair cache",
+            "value": summary["xg_pair_available"],
+            "detail": "Mapped fixtures with home and away SportMonks xG",
+        },
+        {
+            "metric": "News cache",
+            "value": summary["news_available"],
+            "detail": "Mapped fixtures with SportMonks pre-match news",
+        },
+    ]
+
+
 def strength_component_rows(
     features: dict[str, Any],
     prediction: dict[str, Any],
@@ -937,13 +1113,21 @@ def fetch_fixture_detail(fixture_id: int) -> tuple[list[dict[str, Any]], list[di
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_api_football_prediction(fixture_id: int) -> dict[str, Any]:
+    cached = load_api_prediction_cache(fixture_id)
+    if cached is not None:
+        return cached
+
     settings = load_settings()
     client = ApiFootballClient(settings)
     try:
         response = client.get_fixture_predictions(fixture_id)
     except ApiFootballError as exc:
-        return unavailable_prediction(fixture_id, "error", last_error=str(exc))
-    return normalize_api_football_prediction(response, fixture_id)
+        prediction = unavailable_prediction(fixture_id, "error", last_error=str(exc))
+    else:
+        prediction = normalize_api_football_prediction(response, fixture_id)
+
+    save_api_prediction_cache(prediction, fixture_id)
+    return load_api_prediction_cache(fixture_id) or prediction
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -1287,44 +1471,90 @@ def render_model_comparison(
     )
 
 
-def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[dict[str, Any]]:
-    rows = []
-    for fixture in fixtures:
-        goals = fixture.get("goals", {})
-        if goals.get("home") is None or goals.get("away") is None:
-            continue
-        status = fixture.get("fixture", {}).get("status", {}).get("short")
-        if status not in {"FT", "AET", "PEN"}:
-            continue
-        features = build_match_features(fixture)
-        prediction = prematch_prediction(fixture, ratings=ratings)
-        probabilities = {
-            "home": prediction["home_win_probability"],
-            "draw": prediction["draw_probability"],
-            "away": prediction["away_win_probability"],
-        }
-        predicted = max(probabilities, key=probabilities.get)
-        actual = "draw"
-        if features["home_goals"] > features["away_goals"]:
-            actual = "home"
-        elif features["home_goals"] < features["away_goals"]:
-            actual = "away"
-        kickoff = fixture.get("fixture", {}).get("date") or ""
-        myt_fields = fixture_myt_fields(fixture)
-        rows.append(
-            {
-                "fixture_id": features["fixture_id"],
-                "kickoff_utc": kickoff,
-                "myt_datetime": myt_fields.get("myt_datetime", ""),
-                "match": f"{features['home_team']} vs {features['away_team']}",
-                "score": f"{features['home_goals']}-{features['away_goals']}",
-                "predicted": predicted,
-                "actual": actual,
-                "correct": predicted == actual,
-                "confidence": percentage(prediction["model_confidence"]),
-            }
+def render_provider_status(fixtures: list[dict[str, Any]] | None = None) -> None:
+    st.subheader("Provider Status")
+    st.caption(
+        "SportMonks is audited and cached as an external data provider. Cached "
+        "enrichment is evaluated separately from the headline model until a "
+        "non-leaky benchmark proves it improves scoring."
+    )
+    st.dataframe(
+        pd.DataFrame(sportmonks_provider_status_rows()),
+        width="stretch",
+        hide_index=True,
+    )
+    check_rows = sportmonks_audit_check_rows()
+    if check_rows:
+        st.markdown("#### Latest SportMonks access audit")
+        st.dataframe(pd.DataFrame(check_rows), width="stretch", hide_index=True)
+    else:
+        st.info("No SportMonks audit file is available yet.")
+
+    bundle = load_latest_world_cup_enrichment()
+    st.markdown("#### Local SportMonks cache")
+    st.dataframe(
+        pd.DataFrame(sportmonks_cache_status_rows(bundle)),
+        width="stretch",
+        hide_index=True,
+    )
+
+    if not fixtures:
+        st.info("Load a schedule to calculate API-Football to SportMonks coverage.")
+        return
+
+    coverage_rows = sportmonks_mapping_coverage_rows(fixtures, bundle)
+    st.markdown("#### API-Football to SportMonks coverage")
+    st.dataframe(
+        pd.DataFrame(sportmonks_mapping_metric_rows(coverage_rows)),
+        width="stretch",
+        hide_index=True,
+    )
+    if coverage_rows:
+        display_columns = [
+            "api_fixture_id",
+            "api_match",
+            "sportmonks_fixture_id",
+            "sportmonks_match",
+            "mapping_confidence",
+            "mapping_score",
+            "fixture_detail_available",
+            "xg_pair_available",
+            "news_count",
+            "xg_availability",
+        ]
+        st.dataframe(
+            pd.DataFrame(coverage_rows)[
+                [column for column in display_columns if column in coverage_rows[0]]
+            ],
+            width="stretch",
+            hide_index=True,
         )
-    return running_accuracy_rows(rows)
+
+
+def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[dict[str, Any]]:
+    del ratings
+    rows = walk_forward_backtest_rows(fixtures)
+    for row in rows:
+        row["running_accuracy_display"] = percentage(float(row["running_accuracy"]))
+        row["confidence_display"] = percentage(float(row["confidence"]))
+        row["brier_score_display"] = numeric_value(row.get("brier_score"), 3)
+        row["log_loss_display"] = numeric_value(row.get("log_loss"), 3)
+        row["probability_margin_display"] = optional_percentage(
+            row.get("probability_margin")
+        )
+        row["home_form_signal_display"] = numeric_value(row.get("home_form_signal"), 2)
+        row["away_form_signal_display"] = numeric_value(row.get("away_form_signal"), 2)
+        row["expected_goal_gap_display"] = numeric_value(row.get("expected_goal_gap"), 2)
+        row["total_expected_goals_display"] = numeric_value(
+            row.get("total_expected_goals"),
+            2,
+        )
+        row["rating_gap_display"] = numeric_value(row.get("rating_gap"), 1)
+        row["form_gap_display"] = numeric_value(row.get("form_gap"), 2)
+        row["top_vs_draw_margin_display"] = optional_percentage(
+            row.get("top_vs_draw_margin")
+        )
+    return rows
 
 
 def running_accuracy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1349,52 +1579,26 @@ def running_accuracy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def api_football_predicted_outcome(api_prediction: dict[str, Any]) -> str | None:
-    if not api_prediction.get("available"):
-        return None
-    probabilities = {
-        "home": api_prediction.get("home_probability"),
-        "draw": api_prediction.get("draw_probability"),
-        "away": api_prediction.get("away_probability"),
-    }
-    usable_probabilities = {
-        outcome: float(value)
-        for outcome, value in probabilities.items()
-        if value is not None
-    }
-    if not usable_probabilities:
-        return None
-    return max(usable_probabilities, key=usable_probabilities.get)
+    return benchmark_api_football_predicted_outcome(api_prediction)
 
 
 def api_football_running_accuracy_rows(
     rows: list[dict[str, Any]],
     api_predictions_by_fixture: dict[int, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    evaluated_count = 0
-    correct_count = 0
-    enriched_rows = [dict(row) for row in rows]
+    enriched_rows = fair_api_comparison_rows(rows, api_predictions_by_fixture)
     for row in enriched_rows:
-        fixture_id = int(row.get("fixture_id") or 0)
-        api_prediction = api_predictions_by_fixture.get(fixture_id, {})
-        api_predicted = api_football_predicted_outcome(api_prediction)
-        row["api_football_status"] = str(api_prediction.get("status") or "missing")
-        row["api_football_predicted"] = api_predicted or "-"
-        row["api_football_correct"] = None
-        row["api_football_running_accuracy"] = None
-        row["api_football_running_accuracy_display"] = "-"
-        if api_predicted is None:
-            continue
-
-        evaluated_count += 1
-        api_correct = api_predicted == row.get("actual")
-        if api_correct:
-            correct_count += 1
-        api_running_accuracy = correct_count / evaluated_count
-        row["api_football_correct"] = api_correct
-        row["api_football_evaluated_match_number"] = evaluated_count
-        row["api_football_cumulative_correct"] = correct_count
-        row["api_football_running_accuracy"] = api_running_accuracy
-        row["api_football_running_accuracy_display"] = percentage(api_running_accuracy)
+        row["api_football_running_accuracy_display"] = optional_percentage(
+            row.get("api_football_running_accuracy")
+        )
+        row["api_football_brier_score_display"] = numeric_value(
+            row.get("api_football_brier_score"),
+            3,
+        )
+        row["api_football_log_loss_display"] = numeric_value(
+            row.get("api_football_log_loss"),
+            3,
+        )
     return enriched_rows
 
 
@@ -1599,6 +1803,7 @@ def render_prediction_dashboard(
             "Model Breakdown",
             "Model Comparison",
             "Backtest",
+            "Provider Status",
             "Snapshots",
         ]
     )
@@ -1640,7 +1845,7 @@ def render_prediction_dashboard(
         render_model_comparison(features, prediction, api_prediction)
 
     with tabs[4]:
-        st.subheader("Backtest")
+        st.subheader("Fair Walk-Forward Benchmark")
         rows = backtest_rows(fixtures, ratings)
         if rows:
             include_api_benchmark = st.checkbox(
@@ -1662,47 +1867,328 @@ def render_prediction_dashboard(
                     rows,
                     api_predictions_by_fixture,
                 )
+            sportmonks_bundle = load_latest_world_cup_enrichment()
+            sportmonks_coverage_rows = sportmonks_mapping_coverage_rows(
+                fixtures,
+                sportmonks_bundle,
+            )
+            rows = sportmonks_candidate_rows(
+                rows,
+                sportmonks_candidate_enrichment_by_api_fixture(
+                    sportmonks_coverage_rows
+                ),
+            )
+            for row in rows:
+                row["sportmonks_candidate_running_accuracy_display"] = optional_percentage(
+                    row.get("sportmonks_candidate_running_accuracy")
+                )
+                row["sportmonks_candidate_brier_score_display"] = numeric_value(
+                    row.get("sportmonks_candidate_brier_score"),
+                    3,
+                )
+                row["sportmonks_candidate_log_loss_display"] = numeric_value(
+                    row.get("sportmonks_candidate_log_loss"),
+                    3,
+                )
+                row["sportmonks_candidate_home_probability_display"] = (
+                    optional_percentage(
+                        row.get("sportmonks_candidate_home_probability")
+                    )
+                )
+                row["sportmonks_candidate_draw_probability_display"] = (
+                    optional_percentage(
+                        row.get("sportmonks_candidate_draw_probability")
+                    )
+                )
+                row["sportmonks_candidate_away_probability_display"] = (
+                    optional_percentage(
+                        row.get("sportmonks_candidate_away_probability")
+                    )
+                )
             frame = pd.DataFrame(rows)
-            latest = frame.iloc[-1]
-            metric_cols = st.columns(5 if include_api_benchmark else 3)
-            metric_cols[0].metric("Completed fixtures", len(frame))
+            summary = fair_benchmark_summary(rows)
+            sportmonks_summary = sportmonks_candidate_summary(rows)
+            market_gate = benchmark_market_gate(summary, sportmonks_summary)
+            market_rows = market_edge_rows_for_fixtures(
+                fixtures,
+                ratings,
+                sportmonks_coverage_rows,
+                benchmark_gate=market_gate,
+            )
+            market_summary = market_edge_summary(market_rows)
+            diagnostic_counts = benchmark_diagnostic_counts(rows)
+            draw_summary = draw_diagnostic_summary(rows)
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("Completed fixtures", summary["completed"])
             metric_cols[1].metric(
-                "Our running accuracy",
-                percentage(float(latest["running_accuracy"])),
+                "Our walk-forward accuracy",
+                optional_percentage(summary["our_accuracy"]),
             )
             metric_cols[2].metric(
                 "Our correct predictions",
-                f"{int(latest['cumulative_correct'])}/{len(frame)}",
+                f"{summary['our_correct']}/{summary['completed']}",
             )
             if include_api_benchmark:
-                api_summary = api_football_accuracy_summary(rows)
                 metric_cols[3].metric(
+                    "Shared evaluated fixtures",
+                    summary["shared_evaluated"],
+                )
+                fair_cols = st.columns(4)
+                fair_cols[0].metric(
+                    "Our accuracy on shared",
+                    optional_percentage(summary["our_shared_accuracy"]),
+                )
+                fair_cols[1].metric(
                     "API-Football accuracy",
-                    optional_percentage(api_summary["accuracy"]),
+                    optional_percentage(summary["api_accuracy"]),
                 )
-                api_correct_display = (
-                    f"{api_summary['correct']}/{api_summary['evaluated']}"
-                    if api_summary["evaluated"]
-                    else "unavailable"
+                fair_cols[2].metric(
+                    "API-Football correct",
+                    (
+                        f"{summary['api_correct']}/{summary['shared_evaluated']}"
+                        if summary["shared_evaluated"]
+                        else "unavailable"
+                    ),
                 )
-                metric_cols[4].metric("API-Football correct", api_correct_display)
-                if api_summary["unavailable"]:
+                fair_cols[3].metric(
+                    "API unavailable",
+                    summary["api_unavailable"],
+                )
+
+                score_cols = st.columns(4)
+                score_cols[0].metric(
+                    "Our Brier score",
+                    numeric_value(summary["our_brier_score"], 3),
+                )
+                score_cols[1].metric(
+                    "API Brier score",
+                    numeric_value(summary["api_brier_score"], 3),
+                )
+                score_cols[2].metric(
+                    "Our log loss",
+                    numeric_value(summary["our_log_loss"], 3),
+                )
+                score_cols[3].metric(
+                    "API log loss",
+                    numeric_value(summary["api_log_loss"], 3),
+                )
+                confidence_cols = st.columns(2)
+                confidence_cols[0].metric(
+                    "Avg confidence when correct",
+                    optional_percentage(summary["average_confidence_correct"]),
+                )
+                confidence_cols[1].metric(
+                    "Avg confidence when wrong",
+                    optional_percentage(summary["average_confidence_wrong"]),
+                )
+                diagnostic_cols = st.columns(6)
+                diagnostic_cols[0].metric("Both correct", diagnostic_counts["both_correct"])
+                diagnostic_cols[1].metric("Both wrong", diagnostic_counts["both_wrong"])
+                diagnostic_cols[2].metric("Our-only wins", diagnostic_counts["our_only_wins"])
+                diagnostic_cols[3].metric("API-only wins", diagnostic_counts["api_only_wins"])
+                diagnostic_cols[4].metric("Draw misses", diagnostic_counts["draw_misses"])
+                diagnostic_cols[5].metric(
+                    "Away underdog misses",
+                    diagnostic_counts["away_underdog_misses"],
+                )
+                draw_cols = st.columns(6)
+                draw_cols[0].metric("Actual draws", draw_summary["actual_draws"])
+                draw_cols[1].metric("Our draw misses", draw_summary["our_draw_misses"])
+                draw_cols[2].metric("API draw misses", draw_summary["api_draw_misses"])
+                draw_cols[3].metric(
+                    "Avg draw prob on draws",
+                    optional_percentage(
+                        draw_summary["average_draw_probability_on_draws"]
+                    ),
+                )
+                draw_cols[4].metric(
+                    "Avg draw prob on non-draws",
+                    optional_percentage(
+                        draw_summary["average_draw_probability_on_non_draws"]
+                    ),
+                )
+                draw_cols[5].metric(
+                    "Avg top-vs-draw miss margin",
+                    optional_percentage(
+                        draw_summary["average_top_vs_draw_margin_on_draw_misses"]
+                    ),
+                )
+                if summary["api_unavailable"]:
                     st.warning(
                         "API-Football predictions were unavailable for "
-                        f"{api_summary['unavailable']} completed fixture(s)."
+                        f"{summary['api_unavailable']} completed fixture(s)."
                     )
+                if int(summary["shared_evaluated"] or 0) < 10:
+                    st.info(
+                        "Sample size is small. Treat stronger/weaker conclusions "
+                        "as directional until more shared completed fixtures are available."
+                    )
+            st.markdown("#### SportMonks candidate experiment")
+            sportmonks_cols = st.columns(4)
+            sportmonks_cols[0].metric("Mapped completed fixtures", sportmonks_summary["mapped"])
+            sportmonks_cols[1].metric("Eligible non-leaky fixtures", sportmonks_summary["eligible"])
+            sportmonks_cols[2].metric(
+                "Candidate Brier score",
+                numeric_value(sportmonks_summary["candidate_brier_score"], 3),
+            )
+            sportmonks_cols[3].metric(
+                "Candidate log loss",
+                numeric_value(sportmonks_summary["candidate_log_loss"], 3),
+            )
+            sportmonks_score_cols = st.columns(4)
+            sportmonks_score_cols[0].metric(
+                "Baseline Brier on eligible",
+                numeric_value(sportmonks_summary["baseline_brier_score"], 3),
+            )
+            sportmonks_score_cols[1].metric(
+                "Brier delta",
+                numeric_value(sportmonks_summary["brier_delta"], 3),
+            )
+            sportmonks_score_cols[2].metric(
+                "Baseline log loss on eligible",
+                numeric_value(sportmonks_summary["baseline_log_loss"], 3),
+            )
+            sportmonks_score_cols[3].metric(
+                "Log-loss delta",
+                numeric_value(sportmonks_summary["log_loss_delta"], 3),
+            )
+            if sportmonks_summary["candidate_proves_improvement"]:
+                st.success(
+                    "SportMonks candidate beats the current model on Brier score "
+                    "and log loss with the minimum eligible sample. Review before promotion."
+                )
+            else:
+                st.info(
+                    "Headline model remains unchanged. SportMonks data must be "
+                    "mapped, non-leaky, and better on Brier score plus log loss "
+                    "before promotion."
+                )
+            reason_counts = sportmonks_summary.get("reason_counts") or {}
+            if reason_counts:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"reason": key, "fixtures": value}
+                            for key, value in sorted(reason_counts.items())
+                        ]
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+            st.markdown("#### Market edge and CLV gate")
+            market_cols = st.columns(4)
+            market_cols[0].metric(
+                "Benchmark gate",
+                "passed" if market_gate["passed"] else "blocked",
+            )
+            market_cols[1].metric(
+                "Fixtures with market",
+                market_summary["fixtures_with_market"],
+            )
+            market_cols[2].metric(
+                "Paper-trade candidates",
+                market_summary["paper_trade_candidates"],
+            )
+            market_cols[3].metric("CLV tracked", market_summary["clv_tracked"])
+            market_score_cols = st.columns(4)
+            market_score_cols[0].metric(
+                "Gate reason",
+                str(market_gate["reason"]).replace("_", " "),
+            )
+            market_score_cols[1].metric(
+                "Avg model edge",
+                optional_percentage(market_summary["average_edge"]),
+            )
+            market_score_cols[2].metric(
+                "Avg EV at best price",
+                optional_percentage(market_summary["average_expected_value"]),
+            )
+            market_score_cols[3].metric(
+                "Gate sample",
+                f"{market_gate['shared_evaluated']}/{market_gate['min_rows']}",
+            )
+            st.info(
+                "Market rows are research signals only. A row is only flagged "
+                "when the benchmark gate passes and the model has both positive "
+                "edge and positive expected value versus market-implied probability."
+            )
+            if market_rows:
+                market_frame = pd.DataFrame(market_rows)
+                for column in [
+                    "model_probability",
+                    "market_probability",
+                    "edge",
+                    "expected_value",
+                    "entry_market_probability",
+                    "closing_market_probability",
+                    "clv_probability_delta",
+                    "average_overround",
+                ]:
+                    if column in market_frame.columns:
+                        market_frame[f"{column}_display"] = market_frame[column].map(
+                            optional_percentage
+                        )
+                for column in [
+                    "best_decimal",
+                    "entry_decimal",
+                    "closing_decimal",
+                    "clv_decimal_delta",
+                ]:
+                    if column in market_frame.columns:
+                        market_frame[f"{column}_display"] = market_frame[column].map(
+                            lambda value: numeric_value(value, 2)
+                        )
+                market_display_columns = [
+                    "status",
+                    "edge_flag",
+                    "match",
+                    "outcome",
+                    "model_probability_display",
+                    "market_probability_display",
+                    "edge_display",
+                    "best_decimal_display",
+                    "expected_value_display",
+                    "market_snapshots",
+                    "clv_probability_delta_display",
+                    "clv_decimal_delta_display",
+                    "bookmaker_count",
+                    "average_overround_display",
+                    "market_captured_at",
+                    "benchmark_gate",
+                ]
+                st.dataframe(
+                    market_frame[
+                        [
+                            column
+                            for column in market_display_columns
+                            if column in market_frame.columns
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info("No SportMonks market snapshots are available yet.")
             st.caption(
-                "Running accuracy is calculated from completed fixtures in kickoff "
-                "order. Our model uses the pre-match top pick; API-Football uses "
-                "the highest available home/draw/away prediction percentage."
+                "Walk-forward scoring predicts each completed fixture before its "
+                "result updates Elo ratings. API-Football metrics use only shared "
+                "fixtures with available home/draw/away probabilities. SportMonks "
+                "candidate metrics use only mapped enrichment captured before kickoff. "
+                "Market edge rows use pre-kickoff odds snapshots only."
             )
             chart_columns = ["match_number", "running_accuracy"]
             if include_api_benchmark and "api_football_running_accuracy" in frame.columns:
                 chart_columns.append("api_football_running_accuracy")
+            if (
+                "sportmonks_candidate_running_accuracy" in frame.columns
+                and frame["sportmonks_candidate_running_accuracy"].notna().any()
+            ):
+                chart_columns.append("sportmonks_candidate_running_accuracy")
             chart_frame = frame[chart_columns].rename(
                 columns={
                     "running_accuracy": "our_model",
                     "api_football_running_accuracy": "api_football",
+                    "sportmonks_candidate_running_accuracy": "sportmonks_candidate",
                 }
             )
             st.line_chart(chart_frame.set_index("match_number"))
@@ -1719,17 +2205,169 @@ def render_prediction_dashboard(
                 "api_football_predicted",
                 "api_football_correct",
                 "api_football_running_accuracy_display",
-                "confidence",
+                "sportmonks_candidate_status",
+                "sportmonks_candidate_reason",
+                "sportmonks_mapping_confidence",
+                "sportmonks_candidate_predicted",
+                "sportmonks_candidate_correct",
+                "sportmonks_candidate_running_accuracy_display",
+                "brier_score_display",
+                "log_loss_display",
+                "api_football_brier_score_display",
+                "api_football_log_loss_display",
+                "sportmonks_candidate_brier_score_display",
+                "sportmonks_candidate_log_loss_display",
+                "confidence_display",
+                "probability_margin_display",
+                "home_rating_before",
+                "away_rating_before",
+                "home_form_matches_before",
+                "away_form_matches_before",
+                "home_form_signal_display",
+                "away_form_signal_display",
+                "draw_rank",
+                "draw_risk_label",
+                "top_vs_draw_margin_display",
+                "expected_goal_gap_display",
+                "total_expected_goals_display",
+                "rating_gap_display",
+                "form_gap_display",
             ]
             st.dataframe(
                 frame[[column for column in display_columns if column in frame.columns]],
                 width="stretch",
                 hide_index=True,
             )
+            diagnostics = benchmark_diagnostic_rows(rows)
+            if diagnostics:
+                st.markdown("#### Miss and disagreement diagnostics")
+                diagnostic_frame = pd.DataFrame(diagnostics)
+                for column in [
+                    "our_home",
+                    "our_draw",
+                    "our_away",
+                    "api_home",
+                    "api_draw",
+                    "api_away",
+                    "probability_margin",
+                    "confidence",
+                ]:
+                    if column in diagnostic_frame.columns:
+                        diagnostic_frame[f"{column}_display"] = diagnostic_frame[
+                            column
+                        ].map(optional_percentage)
+                for column in [
+                    "home_rating_before",
+                    "away_rating_before",
+                    "home_form_signal",
+                    "away_form_signal",
+                    "expected_goal_gap",
+                    "total_expected_goals",
+                    "rating_gap",
+                    "form_gap",
+                    "brier_score",
+                    "log_loss",
+                ]:
+                    if column in diagnostic_frame.columns:
+                        diagnostic_frame[f"{column}_display"] = diagnostic_frame[
+                            column
+                        ].map(lambda value: numeric_value(value, 3))
+                diagnostic_display_columns = [
+                    "category",
+                    "match_number",
+                    "match",
+                    "score",
+                    "actual",
+                    "our_predicted",
+                    "api_predicted",
+                    "our_home_display",
+                    "our_draw_display",
+                    "our_away_display",
+                    "api_home_display",
+                    "api_draw_display",
+                    "api_away_display",
+                    "probability_margin_display",
+                    "confidence_display",
+                    "home_rating_before_display",
+                    "away_rating_before_display",
+                    "home_form_signal_display",
+                    "away_form_signal_display",
+                    "expected_goal_gap_display",
+                    "total_expected_goals_display",
+                    "rating_gap_display",
+                    "form_gap_display",
+                    "draw_risk_label",
+                    "brier_score_display",
+                    "log_loss_display",
+                ]
+                st.dataframe(
+                    diagnostic_frame[
+                        [
+                            column
+                            for column in diagnostic_display_columns
+                            if column in diagnostic_frame.columns
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+            draw_diagnostics = draw_miss_diagnostic_rows(rows)
+            if draw_diagnostics:
+                st.markdown("#### Draw miss diagnostics")
+                draw_frame = pd.DataFrame(draw_diagnostics)
+                for column in [
+                    "our_draw_probability",
+                    "api_draw_probability",
+                    "top_vs_draw_margin",
+                ]:
+                    if column in draw_frame.columns:
+                        draw_frame[f"{column}_display"] = draw_frame[column].map(
+                            optional_percentage
+                        )
+                for column in [
+                    "expected_goal_gap",
+                    "total_expected_goals",
+                    "rating_gap",
+                    "form_gap",
+                ]:
+                    if column in draw_frame.columns:
+                        draw_frame[f"{column}_display"] = draw_frame[column].map(
+                            lambda value: numeric_value(value, 3)
+                        )
+                draw_display_columns = [
+                    "match",
+                    "score",
+                    "our_predicted",
+                    "api_predicted",
+                    "our_draw_probability_display",
+                    "api_draw_probability_display",
+                    "top_vs_draw_margin_display",
+                    "expected_goal_gap_display",
+                    "total_expected_goals_display",
+                    "rating_gap_display",
+                    "form_gap_display",
+                    "draw_risk_label",
+                    "our_draw_miss",
+                    "api_draw_miss",
+                ]
+                st.dataframe(
+                    draw_frame[
+                        [
+                            column
+                            for column in draw_display_columns
+                            if column in draw_frame.columns
+                        ]
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
         else:
             st.info("No completed fixtures are available for backtesting yet.")
 
     with tabs[5]:
+        render_provider_status(fixtures)
+
+    with tabs[6]:
         st.subheader("Snapshots")
         render_snapshot_list()
 

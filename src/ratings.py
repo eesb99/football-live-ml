@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from src.competition_context import effective_home_advantage_elo
 from src.config import PROJECT_ROOT
 
 
@@ -98,9 +99,13 @@ def update_ratings_for_fixture(
     away_rating = get_rating(ratings, away_id, away_name)
     home_goals, away_goals = fixture_result(fixture) or (0, 0)
     home_actual, away_actual = actual_scores(home_goals, away_goals)
+    home_advantage_elo = effective_home_advantage_elo(
+        fixture,
+        HOME_ADVANTAGE_ELO,
+    )
 
     home_expected = expected_score(
-        home_rating.rating + HOME_ADVANTAGE_ELO,
+        home_rating.rating + home_advantage_elo,
         away_rating.rating,
     )
     away_expected = 1.0 - home_expected

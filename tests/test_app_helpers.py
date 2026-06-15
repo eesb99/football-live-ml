@@ -14,12 +14,16 @@ from app.streamlit_app import (
     extracted_feature_rows,
     fixture_events_display_rows,
     fixture_statistics_display_rows,
+    fetch_api_football_prediction,
     model_comparison_rows,
     model_result_banner_data,
     probability_difference,
     probability_rows,
     running_accuracy_rows,
     should_try_free_plan_fallback,
+    sportmonks_audit_check_rows,
+    sportmonks_mapping_metric_rows,
+    sportmonks_provider_status_rows,
     strength_component_rows,
 )
 
@@ -338,6 +342,33 @@ def test_api_football_accuracy_summary_counts_available_rows_only():
     }
 
 
+def test_fetch_api_football_prediction_uses_cache_before_live_api(monkeypatch):
+    import app.streamlit_app as app_module
+
+    cached = {
+        "fixture_id": 9001,
+        "available": True,
+        "status": "available",
+        "home_probability": 0.55,
+        "draw_probability": 0.25,
+        "away_probability": 0.20,
+    }
+    fetch_api_football_prediction.clear()
+    monkeypatch.setattr(
+        app_module,
+        "load_api_prediction_cache",
+        lambda fixture_id: cached if fixture_id == 9001 else None,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "load_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("settings should not load")),
+    )
+
+    assert fetch_api_football_prediction(9001) == cached
+    fetch_api_football_prediction.clear()
+
+
 def api_prediction():
     return {
         "available": True,
@@ -444,6 +475,102 @@ def test_data_source_rows_show_model_and_adapter_status():
     assert sources["xG"]["status"] == "real xG"
     assert sources["Odds adapter"]["status"] == "missing"
     assert sources["Real xG adapter"]["detail"] == "api_football_real_xg"
+
+
+def test_sportmonks_provider_status_rows_do_not_expose_token(monkeypatch):
+    import app.streamlit_app as app_module
+
+    monkeypatch.setattr(
+        app_module,
+        "load_settings",
+        lambda require_api_key=False: type(
+            "Settings",
+            (),
+            {
+                "sportmonks_api_token": "sportmonks-secret",
+                "sportmonks_base_url": "https://api.sportmonks.test/v3/football",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "load_latest_sportmonks_audit",
+        lambda: {
+            "audit_file": "/tmp/audit.json",
+            "summary": {
+                "accessible_categories": ["leagues", "world_cup_search"],
+                "world_cup_2026_season_ids": [202699],
+                "metadata": {
+                    "subscription": {"plan": "World Cup All-in"},
+                    "rate_limit": {"remaining": 2999},
+                },
+            },
+            "checks": {},
+        },
+    )
+
+    rows = sportmonks_provider_status_rows()
+    dumped = str(rows)
+
+    assert "sportmonks-secret" not in dumped
+    assert rows[0]["status"] == "present"
+    assert any(row["source"] == "Accessible categories" for row in rows)
+
+
+def test_sportmonks_audit_check_rows_flatten_latest_audit():
+    rows = sportmonks_audit_check_rows(
+        {
+            "checks": {
+                "leagues": {
+                    "status": "available",
+                    "available": True,
+                    "record_count": 4,
+                    "endpoint": "leagues",
+                },
+                "odds": {
+                    "status": "error",
+                    "available": False,
+                    "record_count": 0,
+                    "error": "SportMonks HTTP 403: package missing",
+                },
+            }
+        }
+    )
+
+    assert rows[0] == {
+        "category": "leagues",
+        "status": "available",
+        "available": True,
+        "records": 4,
+        "detail": "leagues",
+    }
+    assert rows[1]["category"] == "odds"
+    assert rows[1]["status"] == "error"
+
+
+def test_sportmonks_mapping_metric_rows_summarize_provider_coverage():
+    rows = sportmonks_mapping_metric_rows(
+        [
+            {
+                "mapping_confidence": "exact",
+                "fixture_detail_available": True,
+                "xg_pair_available": True,
+                "news_count": 1,
+            },
+            {
+                "mapping_confidence": "no_match",
+                "fixture_detail_available": False,
+                "xg_pair_available": False,
+                "news_count": 0,
+            },
+        ]
+    )
+    metrics = {row["metric"]: row for row in rows}
+
+    assert metrics["API-Football fixtures"]["value"] == 2
+    assert metrics["Mapped to SportMonks"]["value"] == 1
+    assert metrics["xG pair cache"]["value"] == 1
+    assert metrics["News cache"]["value"] == 1
 
 
 def test_fixture_statistics_display_rows_flatten_percentages_and_mixed_values():

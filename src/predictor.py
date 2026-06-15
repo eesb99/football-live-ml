@@ -7,6 +7,10 @@ from typing import Any
 import numpy as np
 
 from src.adapters import PaidDataSnapshot, default_paid_data_snapshot
+from src.competition_context import (
+    effective_home_advantage_elo,
+    is_neutral_world_cup_fixture,
+)
 from src.features import build_match_features, is_live_status
 from src.model import predict_match_probabilities
 from src.ratings import (
@@ -202,10 +206,134 @@ def outcome_probabilities_from_expected_goals(
     return _normalize_three(home_win, draw, away_win)
 
 
-def prematch_expected_goals(home_rating: float, away_rating: float) -> tuple[float, float]:
-    rating_gap = (home_rating + HOME_ADVANTAGE_ELO) - away_rating
-    home_expected = 1.35 * np.exp(rating_gap / 900.0)
-    away_expected = 1.10 * np.exp(-rating_gap / 900.0)
+def calibrate_draw_probability(
+    probabilities: tuple[float, float, float],
+    home_expected_goals: float,
+    away_expected_goals: float,
+    rating_gap: float = 0.0,
+    form_gap: float = 0.0,
+    neutral_site: bool = False,
+    home_matches_played: int = 0,
+    away_matches_played: int = 0,
+) -> tuple[float, float, float]:
+    home, draw, away = _normalize_three(*probabilities)
+    expected_gap = abs(home_expected_goals - away_expected_goals)
+    total_expected = home_expected_goals + away_expected_goals
+    top_probability = max(home, draw, away)
+    top_vs_draw_margin = max(0.0, top_probability - draw)
+    rating_close = abs(rating_gap) <= 115.0
+    form_close = abs(form_gap) <= 0.30
+    if (
+        expected_gap >= 0.42
+        or total_expected > 3.15
+        or top_vs_draw_margin > 0.22
+        or not rating_close
+        or not form_close
+    ):
+        return home, draw, away
+
+    xg_closeness = 1.0 - min(expected_gap / 0.42, 1.0)
+    rating_closeness = 1.0 - min(abs(rating_gap) / 115.0, 1.0)
+    form_closeness = 1.0 - min(abs(form_gap) / 0.30, 1.0)
+    tempo_fit = 1.0 - min(abs(total_expected - 2.25) / 1.15, 1.0)
+    margin_fit = 1.0 - min(top_vs_draw_margin / 0.22, 1.0)
+    boost = 0.055 * (
+        xg_closeness * 0.34
+        + rating_closeness * 0.22
+        + form_closeness * 0.18
+        + max(tempo_fit, 0.25) * 0.16
+        + margin_fit * 0.10
+    )
+    if neutral_site and home_matches_played + away_matches_played <= 2:
+        leading_win_probability = max(home, away)
+        cold_start_draw_target = min(
+            0.36,
+            max(draw, leading_win_probability - 0.02),
+        )
+        boost = max(boost, max(0.0, cold_start_draw_target - draw))
+    if boost <= 0.0:
+        return home, draw, away
+
+    draw = min(draw + boost, 0.44)
+    remaining = max(1.0 - draw, 0.0)
+    win_total = home + away
+    if win_total <= 0.0:
+        return _normalize_three(remaining / 2.0, draw, remaining / 2.0)
+    return _normalize_three(
+        remaining * (home / win_total),
+        draw,
+        remaining * (away / win_total),
+    )
+
+
+def probability_entropy(probabilities: tuple[float, float, float]) -> float:
+    entropy = 0.0
+    for probability in probabilities:
+        if probability > 0.0:
+            entropy -= probability * float(np.log(probability))
+    return float(entropy / np.log(3.0))
+
+
+def model_confidence_from_probabilities(
+    probabilities: tuple[float, float, float],
+    home_matches_played: int,
+    away_matches_played: int,
+) -> float:
+    ordered = sorted(probabilities, reverse=True)
+    top_probability = ordered[0]
+    margin = ordered[0] - ordered[1]
+    certainty = 1.0 - probability_entropy(probabilities)
+    depth = min(home_matches_played + away_matches_played, 12) / 12.0
+    fallback_penalty = 0.12 if home_matches_played == 0 or away_matches_played == 0 else 0.0
+    confidence = (
+        0.26
+        + top_probability * 0.20
+        + margin * 0.32
+        + certainty * 0.18
+        + depth * 0.18
+        - fallback_penalty
+    )
+    return float(np.clip(confidence, 0.22, 0.86))
+
+
+def apply_form_adjustment_to_expected_goals(
+    home_expected_goals: float,
+    away_expected_goals: float,
+    form_adjustment: dict[str, Any] | None,
+) -> tuple[float, float, list[str]]:
+    if not form_adjustment:
+        return home_expected_goals, away_expected_goals, []
+
+    home_signal = float(form_adjustment.get("home_form_signal", 0.0) or 0.0)
+    away_signal = float(form_adjustment.get("away_form_signal", 0.0) or 0.0)
+    edge = float(np.clip(home_signal - away_signal, -0.35, 0.35))
+    home_multiplier = float(np.clip(1.0 + edge * 0.08, 0.94, 1.06))
+    away_multiplier = float(np.clip(1.0 - edge * 0.08, 0.94, 1.06))
+    adjusted_home = float(np.clip(home_expected_goals * home_multiplier, 0.25, 3.8))
+    adjusted_away = float(np.clip(away_expected_goals * away_multiplier, 0.25, 3.8))
+    drivers = []
+    if abs(edge) >= 0.05:
+        leader = form_adjustment.get("home_team") if edge > 0 else form_adjustment.get("away_team")
+        drivers.append(
+            f"Recent form lightly favors {leader}; pre-match expected goals are adjusted by prior completed fixtures only."
+        )
+    else:
+        drivers.append("Recent form is balanced; no material form adjustment is applied.")
+    return adjusted_home, adjusted_away, drivers
+
+
+def prematch_expected_goals(
+    home_rating: float,
+    away_rating: float,
+    *,
+    home_advantage_elo: float = HOME_ADVANTAGE_ELO,
+    neutral_site: bool = False,
+) -> tuple[float, float]:
+    rating_gap = (home_rating + home_advantage_elo) - away_rating
+    home_base = 1.30 if neutral_site else 1.35
+    away_base = 1.05 if neutral_site else 1.10
+    home_expected = home_base * np.exp(rating_gap / 900.0)
+    away_expected = away_base * np.exp(-rating_gap / 900.0)
     return float(np.clip(home_expected, 0.25, 3.8)), float(np.clip(away_expected, 0.25, 3.8))
 
 
@@ -213,6 +341,7 @@ def prematch_prediction(
     fixture: dict[str, Any],
     ratings: RatingMap | None = None,
     paid_data: PaidDataSnapshot | None = None,
+    form_adjustment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ratings = ratings or {}
     paid_data = paid_data or default_paid_data_snapshot()
@@ -224,14 +353,69 @@ def prematch_prediction(
     away_name = away.get("name") or "Away"
     home_rating = get_rating(ratings, home_id, home_name)
     away_rating = get_rating(ratings, away_id, away_name)
-    home_xg, away_xg = prematch_expected_goals(home_rating.rating, away_rating.rating)
+    home_advantage_elo = effective_home_advantage_elo(
+        fixture,
+        HOME_ADVANTAGE_ELO,
+    )
+    neutral_site = is_neutral_world_cup_fixture(fixture, HOME_ADVANTAGE_ELO)
+    home_xg, away_xg = prematch_expected_goals(
+        home_rating.rating,
+        away_rating.rating,
+        home_advantage_elo=home_advantage_elo,
+        neutral_site=neutral_site,
+    )
+    form_adjustment = dict(form_adjustment or {})
+    form_adjustment.setdefault("home_team", home_name)
+    form_adjustment.setdefault("away_team", away_name)
+    home_xg, away_xg, form_drivers = apply_form_adjustment_to_expected_goals(
+        home_xg,
+        away_xg,
+        form_adjustment,
+    )
+    rating_gap = (home_rating.rating + home_advantage_elo) - away_rating.rating
+    form_gap = float(
+        form_adjustment.get("home_form_signal", 0.0)
+        - form_adjustment.get("away_form_signal", 0.0)
+    )
     home_win, draw, away_win = outcome_probabilities_from_expected_goals(home_xg, away_xg)
+    raw_draw = draw
+    home_win, draw, away_win = calibrate_draw_probability(
+        (home_win, draw, away_win),
+        home_xg,
+        away_xg,
+        rating_gap=rating_gap,
+        form_gap=form_gap,
+        neutral_site=neutral_site,
+        home_matches_played=home_rating.matches_played,
+        away_matches_played=away_rating.matches_played,
+    )
     home_win, draw, away_win = _blend_with_odds_prior(
         (home_win, draw, away_win),
         paid_data,
     )
-    confidence = 0.45 + min(home_rating.matches_played + away_rating.matches_played, 12) * 0.025
-    drivers = prematch_drivers(home_name, away_name, home_rating.rating, away_rating.rating)
+    confidence = model_confidence_from_probabilities(
+        (home_win, draw, away_win),
+        home_rating.matches_played,
+        away_rating.matches_played,
+    )
+    drivers = prematch_drivers(
+        home_name,
+        away_name,
+        home_rating.rating,
+        away_rating.rating,
+        home_advantage_elo=home_advantage_elo,
+        neutral_site=neutral_site,
+    )
+    drivers.extend(form_drivers)
+    if draw > raw_draw + 0.001:
+        drivers.append(
+            "Draw calibration is active because expected goals, ratings, form, venue context, and top-vs-draw margin are close."
+        )
+    ordered_probabilities = sorted((home_win, draw, away_win), reverse=True)
+    margin = ordered_probabilities[0] - ordered_probabilities[1]
+    drivers.append(
+        f"Confidence reflects top probability, {margin * 100:.1f} percentage-point margin, rating depth, and probability uncertainty."
+    )
     if paid_data.odds_available:
         drivers.append("Optional odds adapter is available and lightly informs the pre-match prior.")
     else:
@@ -278,9 +462,19 @@ def prematch_drivers(
     away_name: str,
     home_rating: float,
     away_rating: float,
+    *,
+    home_advantage_elo: float = HOME_ADVANTAGE_ELO,
+    neutral_site: bool = False,
 ) -> list[str]:
-    rating_gap = (home_rating + HOME_ADVANTAGE_ELO) - away_rating
-    drivers = [f"Home advantage adds {HOME_ADVANTAGE_ELO:.0f} Elo points to {home_name}."]
+    rating_gap = (home_rating + home_advantage_elo) - away_rating
+    if neutral_site:
+        drivers = [
+            "Neutral World Cup venue removes the standard home-advantage Elo boost."
+        ]
+    else:
+        drivers = [
+            f"Home or host advantage adds {home_advantage_elo:.0f} Elo points to {home_name}."
+        ]
     if abs(home_rating - DEFAULT_RATING) < 0.01 and abs(away_rating - DEFAULT_RATING) < 0.01:
         drivers.append("Both teams use fallback 1500 ratings until enough results are loaded.")
     if rating_gap > 80:
