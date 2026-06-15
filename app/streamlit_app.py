@@ -1543,6 +1543,10 @@ def render_model_comparison(
 def render_public_odds_refresh_panel() -> None:
     st.markdown("#### Refresh cached odds")
     st.caption(
+        "Provider token status: "
+        f"{'configured' if sportmonks_token_configured() else 'not configured'}."
+    )
+    st.caption(
         "Public refresh captures cached SportMonks pre-kickoff odds for the next "
         f"{PUBLIC_ODDS_REFRESH_MAX_FIXTURES} fixtures. It is app-wide cooldown "
         f"limited to {PUBLIC_ODDS_REFRESH_COOLDOWN_SECONDS // 60} minutes."
@@ -2625,7 +2629,6 @@ def render_prediction_dashboard(
 
     with tabs[5]:
         st.subheader("Paper Trading")
-        render_public_odds_refresh_panel()
         context = benchmark_market_context(fixtures, ratings)
         market_gate = context["market_gate"]
         market_summary = context["market_summary"]
@@ -2705,6 +2708,7 @@ def render_prediction_dashboard(
             "The public dashboard reads cached odds only. Refresh is available "
             "when SPORTMONKS_API_TOKEN is configured in Streamlit Secrets."
         )
+        render_public_odds_refresh_panel()
         if paper_rows:
             paper_frame = pd.DataFrame(paper_rows)
             for column in [
@@ -2805,7 +2809,11 @@ def render_prediction_dashboard(
                 hide_index=True,
             )
         else:
-            st.info("No cached pre-kickoff odds rows are available for paper trading.")
+            st.info(
+                "No cached pre-kickoff odds rows are available for paper trading. "
+                "Use Refresh cached odds above after SPORTMONKS_API_TOKEN is configured "
+                "in Streamlit Secrets."
+            )
 
     with tabs[6]:
         render_provider_status(fixtures)
