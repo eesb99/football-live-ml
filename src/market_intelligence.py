@@ -290,6 +290,114 @@ def closing_line_for_outcome(
     }
 
 
+def _hours_before_kickoff(snapshot: dict[str, Any], kickoff_utc: Any) -> float | None:
+    kickoff = parse_fixture_datetime(kickoff_utc)
+    captured = parse_capture_datetime(snapshot.get("captured_at"))
+    if kickoff is None or captured is None:
+        return None
+    return float((kickoff - captured).total_seconds() / 3600.0)
+
+
+def odds_movement_for_outcome(
+    snapshots: list[dict[str, Any]],
+    outcome: str,
+    *,
+    model_probability: float,
+    kickoff_utc: Any,
+) -> dict[str, Any]:
+    if not snapshots or outcome not in OUTCOMES:
+        return {
+            "first_decimal": None,
+            "latest_decimal": None,
+            "best_seen_decimal": None,
+            "worst_seen_decimal": None,
+            "first_market_probability": None,
+            "latest_market_probability": None,
+            "first_edge": None,
+            "latest_edge": None,
+            "edge_change": None,
+            "first_expected_value": None,
+            "latest_expected_value": None,
+            "expected_value_change": None,
+            "clv_direction": "unavailable",
+            "first_hours_to_kickoff": None,
+            "latest_hours_to_kickoff": None,
+        }
+
+    first = snapshots[0]
+    latest = snapshots[-1]
+    decimal_values = [
+        float(snapshot[f"{outcome}_best_decimal"])
+        for snapshot in snapshots
+        if snapshot.get(f"{outcome}_best_decimal") is not None
+    ]
+    first_decimal = first.get(f"{outcome}_best_decimal")
+    latest_decimal = latest.get(f"{outcome}_best_decimal")
+    first_probability = first.get(f"{outcome}_probability")
+    latest_probability = latest.get(f"{outcome}_probability")
+    first_edge = (
+        model_probability - float(first_probability)
+        if first_probability is not None
+        else None
+    )
+    latest_edge = (
+        model_probability - float(latest_probability)
+        if latest_probability is not None
+        else None
+    )
+    first_ev = (
+        model_probability * float(first_decimal) - 1.0
+        if first_decimal is not None
+        else None
+    )
+    latest_ev = (
+        model_probability * float(latest_decimal) - 1.0
+        if latest_decimal is not None
+        else None
+    )
+
+    clv_direction = "unavailable"
+    if len(snapshots) >= 2 and first_decimal is not None and latest_decimal is not None:
+        decimal_delta = float(first_decimal) - float(latest_decimal)
+        probability_delta = (
+            float(latest_probability) - float(first_probability)
+            if first_probability is not None and latest_probability is not None
+            else 0.0
+        )
+        if decimal_delta > 0.005 or probability_delta > 0.005:
+            clv_direction = "favorable"
+        elif decimal_delta < -0.005 or probability_delta < -0.005:
+            clv_direction = "unfavorable"
+        else:
+            clv_direction = "flat"
+
+    return {
+        "first_decimal": first_decimal,
+        "latest_decimal": latest_decimal,
+        "best_seen_decimal": max(decimal_values) if decimal_values else None,
+        "worst_seen_decimal": min(decimal_values) if decimal_values else None,
+        "first_market_probability": first_probability,
+        "latest_market_probability": latest_probability,
+        "first_edge": first_edge,
+        "latest_edge": latest_edge,
+        "edge_change": (
+            latest_edge - first_edge
+            if latest_edge is not None and first_edge is not None
+            else None
+        ),
+        "first_expected_value": first_ev,
+        "latest_expected_value": latest_ev,
+        "expected_value_change": (
+            latest_ev - first_ev
+            if latest_ev is not None and first_ev is not None
+            else None
+        ),
+        "clv_direction": clv_direction,
+        "first_hours_to_kickoff": _hours_before_kickoff(first, kickoff_utc),
+        "latest_hours_to_kickoff": _hours_before_kickoff(latest, kickoff_utc),
+    }
+
+
 def benchmark_market_gate(
     fair_summary: dict[str, Any],
     candidate_summary: dict[str, Any],
@@ -429,6 +537,12 @@ def market_edge_rows_for_fixtures(
             market_snapshot,
         )
         clv = closing_line_for_outcome(snapshots, best["outcome"])
+        movement = odds_movement_for_outcome(
+            snapshots,
+            best["outcome"],
+            model_probability=float(best["model_probability"]),
+            kickoff_utc=kickoff_utc,
+        )
         passes_market = (
             best["edge"] >= min_edge
             and best["expected_value"] is not None
@@ -445,6 +559,7 @@ def market_edge_rows_for_fixtures(
                 **base_row,
                 **best,
                 **clv,
+                **movement,
                 "status": status,
                 "edge_flag": status == "paper_trade_candidate",
                 "market_captured_at": market_snapshot.get("captured_at"),

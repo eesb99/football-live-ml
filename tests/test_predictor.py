@@ -19,6 +19,7 @@ from src.ratings import (
     update_ratings_from_results,
 )
 from src.storage import save_prediction_snapshot
+from src.team_priors import TeamPrior
 
 
 def fixture(status_short="NS", elapsed=None, home_goals=None, away_goals=None):
@@ -149,6 +150,50 @@ def test_prematch_prediction_prefers_stronger_team():
     assert abs(outcome_sum - 1.0) < 0.001
     assert prediction["home_win_probability"] > prediction["away_win_probability"]
     assert prediction["model_drivers"]
+
+
+def test_prematch_prediction_uses_non_leaky_team_prior_conservatively():
+    base_prediction = predict_fixture(fixture())
+    prior_prediction = predict_fixture(
+        fixture(),
+        team_priors={
+            20: TeamPrior(
+                team_id=20,
+                team_name="Beta",
+                strength_rating=1800,
+                source="fixture-test-prior",
+                source_category="pre_tournament_rating",
+                as_of="2026-06-01T00:00:00+00:00",
+            )
+        },
+    )
+
+    assert prior_prediction["team_prior_available"] is True
+    assert prior_prediction["away_prior_adjustment"] > 0
+    assert prior_prediction["away_win_probability"] > base_prediction["away_win_probability"]
+    assert prior_prediction["home_win_probability"] < base_prediction["home_win_probability"]
+    assert "Non-leaky pre-match team priors are active" in prior_prediction["model_driver_summary"]
+
+
+def test_prematch_prediction_ignores_late_team_prior():
+    base_prediction = predict_fixture(fixture())
+    prior_prediction = predict_fixture(
+        fixture(),
+        team_priors={
+            20: TeamPrior(
+                team_id=20,
+                team_name="Beta",
+                strength_rating=1800,
+                source="fixture-test-prior",
+                source_category="pre_tournament_rating",
+                as_of="2026-06-15T00:00:00+00:00",
+            )
+        },
+    )
+
+    assert prior_prediction["team_prior_available"] is False
+    assert prior_prediction["away_prior_adjustment"] == 0
+    assert prior_prediction["away_win_probability"] == base_prediction["away_win_probability"]
 
 
 def test_prematch_confidence_reflects_probability_margin_and_rating_depth():

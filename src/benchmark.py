@@ -22,6 +22,7 @@ from src.ratings import (
 )
 from src.schedule import fixture_myt_fields
 from src.sportmonks_mapping import parse_fixture_datetime
+from src.team_priors import TeamPriorMap
 
 
 OUTCOMES = ("home", "draw", "away")
@@ -260,6 +261,8 @@ def walk_forward_backtest_rows(
     fixtures: list[dict[str, Any]],
     initial_ratings: RatingMap | None = None,
     k_factor: float = DEFAULT_K_FACTOR,
+    team_priors: TeamPriorMap | None = None,
+    model_label: str = "baseline",
 ) -> list[dict[str, Any]]:
     ratings = dict(initial_ratings or {})
     form_by_team: dict[int, TeamFormState] = {}
@@ -286,6 +289,7 @@ def walk_forward_backtest_rows(
             fixture,
             ratings=ratings,
             form_adjustment=form_adjustment,
+            team_priors=team_priors,
         )
         probabilities = probabilities_from_prediction(prediction)
         predicted = predicted_outcome(probabilities) or "-"
@@ -340,6 +344,7 @@ def walk_forward_backtest_rows(
                 "predicted": predicted,
                 "actual": actual,
                 "correct": correct,
+                "model_label": model_label,
                 "match_number": match_number,
                 "cumulative_correct": correct_count,
                 "running_accuracy": correct_count / match_number,
@@ -359,6 +364,24 @@ def walk_forward_backtest_rows(
                 "running_log_loss": float(np.mean(log_loss_values)) if log_loss_values else None,
                 "home_rating_before": home_rating.rating,
                 "away_rating_before": away_rating.rating,
+                "home_strength_with_prior": float(
+                    prediction.get("home_strength_score", home_rating.rating) or 0.0
+                ),
+                "away_strength_with_prior": float(
+                    prediction.get("away_strength_score", away_rating.rating) or 0.0
+                ),
+                "team_prior_available": bool(prediction.get("team_prior_available")),
+                "team_prior_source": str(
+                    prediction.get("team_prior_source") or "not configured"
+                ),
+                "home_prior_rating": prediction.get("home_prior_rating"),
+                "away_prior_rating": prediction.get("away_prior_rating"),
+                "home_prior_adjustment": float(
+                    prediction.get("home_prior_adjustment", 0.0) or 0.0
+                ),
+                "away_prior_adjustment": float(
+                    prediction.get("away_prior_adjustment", 0.0) or 0.0
+                ),
                 "home_matches_before": home_rating.matches_played,
                 "away_matches_before": away_rating.matches_played,
                 "home_form_matches_before": form_adjustment["home_form_matches"],
@@ -399,6 +422,132 @@ def walk_forward_backtest_rows(
         )
 
     return rows
+
+
+def team_prior_ablation_rows(
+    fixtures: list[dict[str, Any]],
+    team_priors: TeamPriorMap | None,
+    *,
+    initial_ratings: RatingMap | None = None,
+    k_factor: float = DEFAULT_K_FACTOR,
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        "baseline": walk_forward_backtest_rows(
+            fixtures,
+            initial_ratings=initial_ratings,
+            k_factor=k_factor,
+            model_label="baseline",
+        ),
+        "team_priors": walk_forward_backtest_rows(
+            fixtures,
+            initial_ratings=initial_ratings,
+            k_factor=k_factor,
+            team_priors=team_priors,
+            model_label="team_priors",
+        ),
+    }
+
+
+def team_prior_ablation_summary(
+    baseline_rows: list[dict[str, Any]],
+    prior_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    shared_count = min(len(baseline_rows), len(prior_rows))
+    changed_picks = 0
+    home_delta_values: list[float] = []
+    draw_delta_values: list[float] = []
+    away_delta_values: list[float] = []
+    for baseline, prior in zip(baseline_rows, prior_rows):
+        if baseline.get("predicted") != prior.get("predicted"):
+            changed_picks += 1
+        home_delta_values.append(
+            float(prior.get("home_probability", 0.0) or 0.0)
+            - float(baseline.get("home_probability", 0.0) or 0.0)
+        )
+        draw_delta_values.append(
+            float(prior.get("draw_probability", 0.0) or 0.0)
+            - float(baseline.get("draw_probability", 0.0) or 0.0)
+        )
+        away_delta_values.append(
+            float(prior.get("away_probability", 0.0) or 0.0)
+            - float(baseline.get("away_probability", 0.0) or 0.0)
+        )
+
+    baseline_summary = fair_benchmark_summary(baseline_rows)
+    prior_summary = fair_benchmark_summary(prior_rows)
+    baseline_brier = _mean(
+        [
+            float(row["brier_score"])
+            for row in baseline_rows
+            if row.get("brier_score") is not None
+        ]
+    )
+    prior_brier = _mean(
+        [
+            float(row["brier_score"])
+            for row in prior_rows
+            if row.get("brier_score") is not None
+        ]
+    )
+    baseline_log_loss = _mean(
+        [
+            float(row["log_loss"])
+            for row in baseline_rows
+            if row.get("log_loss") is not None
+        ]
+    )
+    prior_log_loss = _mean(
+        [
+            float(row["log_loss"])
+            for row in prior_rows
+            if row.get("log_loss") is not None
+        ]
+    )
+    prior_rows_with_signal = sum(
+        1 for row in prior_rows if row.get("team_prior_available")
+    )
+    improves_brier = (
+        prior_brier is not None
+        and baseline_brier is not None
+        and prior_brier < baseline_brier
+    )
+    improves_log_loss = (
+        prior_log_loss is not None
+        and baseline_log_loss is not None
+        and prior_log_loss < baseline_log_loss
+    )
+    return {
+        "shared_rows": shared_count,
+        "prior_rows_with_signal": prior_rows_with_signal,
+        "baseline_accuracy": baseline_summary.get("our_accuracy"),
+        "prior_accuracy": prior_summary.get("our_accuracy"),
+        "baseline_brier_score": baseline_brier,
+        "prior_brier_score": prior_brier,
+        "brier_delta": (
+            prior_brier - baseline_brier
+            if prior_brier is not None and baseline_brier is not None
+            else None
+        ),
+        "baseline_log_loss": baseline_log_loss,
+        "prior_log_loss": prior_log_loss,
+        "log_loss_delta": (
+            prior_log_loss - baseline_log_loss
+            if prior_log_loss is not None and baseline_log_loss is not None
+            else None
+        ),
+        "changed_picks": changed_picks,
+        "average_home_probability_delta": _mean(home_delta_values),
+        "average_draw_probability_delta": _mean(draw_delta_values),
+        "average_away_probability_delta": _mean(away_delta_values),
+        "candidate_proves_improvement": (
+            prior_rows_with_signal > 0 and improves_brier and improves_log_loss
+        ),
+        "headline_recommendation": (
+            "continue_prior_research"
+            if prior_rows_with_signal > 0 and improves_brier and improves_log_loss
+            else "keep_current_model"
+        ),
+    }
 
 
 def fair_api_comparison_rows(

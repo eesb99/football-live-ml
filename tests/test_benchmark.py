@@ -13,9 +13,12 @@ from src.benchmark import (
     sportmonks_candidate_rows,
     sportmonks_candidate_summary,
     sportmonks_enrichment_is_non_leaky,
+    team_prior_ablation_rows,
+    team_prior_ablation_summary,
     walk_forward_backtest_rows,
 )
 from src.ratings import DEFAULT_RATING
+from src.team_priors import TeamPrior
 
 
 def fixture(
@@ -104,6 +107,95 @@ def test_walk_forward_scores_fixture_before_updating_ratings_from_that_result():
     assert rows[1]["away_form_matches_before"] == 1
     assert rows[1]["home_form_signal"] < 0
     assert rows[1]["away_form_signal"] > 0
+
+
+def test_walk_forward_applies_only_non_leaky_team_priors():
+    match = fixture(
+        1,
+        "2026-06-12T10:00:00+00:00",
+        10,
+        "Alpha",
+        20,
+        "Beta",
+        0,
+        1,
+    )
+
+    clean_rows = walk_forward_backtest_rows(
+        [match],
+        team_priors={
+            20: TeamPrior(
+                team_id=20,
+                team_name="Beta",
+                strength_rating=1800,
+                source="fixture-test-prior",
+                source_category="pre_tournament_rating",
+                as_of="2026-06-01T00:00:00+00:00",
+            )
+        },
+        model_label="team_priors",
+    )
+    leaky_rows = walk_forward_backtest_rows(
+        [match],
+        team_priors={
+            20: TeamPrior(
+                team_id=20,
+                team_name="Beta",
+                strength_rating=1800,
+                source="fixture-test-prior",
+                source_category="same_tournament_results",
+                as_of="2026-06-01T00:00:00+00:00",
+            )
+        },
+        model_label="team_priors",
+    )
+
+    assert clean_rows[0]["model_label"] == "team_priors"
+    assert clean_rows[0]["team_prior_available"] is True
+    assert clean_rows[0]["away_prior_adjustment"] > 0
+    assert clean_rows[0]["away_probability"] > leaky_rows[0]["away_probability"]
+    assert leaky_rows[0]["team_prior_available"] is False
+
+
+def test_team_prior_ablation_summary_reports_metric_deltas_and_changed_picks():
+    matches = [
+        fixture(
+            1,
+            "2026-06-12T10:00:00+00:00",
+            10,
+            "Alpha",
+            20,
+            "Beta",
+            0,
+            1,
+        )
+    ]
+
+    rows = team_prior_ablation_rows(
+        matches,
+        {
+            20: TeamPrior(
+                team_id=20,
+                team_name="Beta",
+                strength_rating=1900,
+                source="fixture-test-prior",
+                source_category="pre_tournament_rating",
+                as_of="2026-06-01T00:00:00+00:00",
+            )
+        },
+    )
+    summary = team_prior_ablation_summary(rows["baseline"], rows["team_priors"])
+
+    assert summary["shared_rows"] == 1
+    assert summary["prior_rows_with_signal"] == 1
+    assert summary["changed_picks"] in {0, 1}
+    assert summary["prior_brier_score"] is not None
+    assert summary["prior_log_loss"] is not None
+    assert summary["average_away_probability_delta"] > 0
+    assert summary["headline_recommendation"] in {
+        "continue_prior_research",
+        "keep_current_model",
+    }
 
 
 def test_brier_score_and_log_loss_for_known_probabilities():

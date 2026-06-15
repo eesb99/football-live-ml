@@ -9,6 +9,7 @@ from src.market_intelligence import (
     consensus_market_snapshot,
     market_edge_rows_for_fixtures,
     normalize_outcome_label,
+    odds_movement_for_outcome,
     pre_kickoff_snapshots,
 )
 
@@ -179,6 +180,41 @@ def test_closing_line_for_outcome_tracks_probability_and_decimal_deltas():
     assert clv["clv_available"] is True
     assert round(clv["clv_decimal_delta"], 2) == 0.60
     assert round(clv["clv_probability_delta"], 2) == 0.06
+
+
+def test_odds_movement_tracks_first_latest_best_worst_and_edge_change():
+    snapshots = [
+        {
+            "captured_at": "2026-06-14T08:00:00+00:00",
+            "home_best_decimal": 3.8,
+            "home_probability": 0.30,
+        },
+        {
+            "captured_at": "2026-06-14T09:00:00+00:00",
+            "home_best_decimal": 3.2,
+            "home_probability": 0.36,
+        },
+    ]
+
+    movement = odds_movement_for_outcome(
+        snapshots,
+        "home",
+        model_probability=0.42,
+        kickoff_utc="2026-06-14T10:00:00+00:00",
+    )
+
+    assert movement["first_decimal"] == 3.8
+    assert movement["latest_decimal"] == 3.2
+    assert movement["best_seen_decimal"] == 3.8
+    assert movement["worst_seen_decimal"] == 3.2
+    assert round(movement["first_edge"], 2) == 0.12
+    assert round(movement["latest_edge"], 2) == 0.06
+    assert round(movement["edge_change"], 2) == -0.06
+    assert round(movement["first_expected_value"], 3) == 0.596
+    assert round(movement["latest_expected_value"], 3) == 0.344
+    assert movement["clv_direction"] == "favorable"
+    assert movement["first_hours_to_kickoff"] == 2.0
+    assert movement["latest_hours_to_kickoff"] == 1.0
 
 
 def test_pre_kickoff_snapshots_treat_timezone_naive_captures_as_local_time():

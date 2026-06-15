@@ -23,6 +23,7 @@ from src.benchmark import (
     fair_benchmark_summary,
     sportmonks_candidate_rows,
     sportmonks_candidate_summary,
+    team_prior_ablation_summary,
     walk_forward_backtest_rows,
 )
 from src.config import MissingApiKeyError, load_settings
@@ -35,6 +36,13 @@ from src.market_intelligence import (
     benchmark_market_gate,
     market_edge_rows_for_fixtures,
     market_edge_summary,
+)
+from src.paper_trading import (
+    DEFAULT_KELLY_MULTIPLIER,
+    DEFAULT_PAPER_BANKROLL,
+    DEFAULT_STAKE_CAP_FRACTION,
+    paper_trade_rows,
+    paper_trade_summary,
 )
 from src.predictor import predict_fixture, prediction_snapshot_row, prematch_prediction
 from src.ratings import (
@@ -55,6 +63,7 @@ from src.storage import (
     save_prediction_snapshot,
     save_snapshot,
 )
+from src.team_priors import TEAM_PRIORS_PATH, load_team_priors, prior_schema_rows
 from src.sportmonks_enrichment import (
     load_latest_world_cup_enrichment,
     sportmonks_cache_status_rows,
@@ -1531,9 +1540,19 @@ def render_provider_status(fixtures: list[dict[str, Any]] | None = None) -> None
         )
 
 
-def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[dict[str, Any]]:
+def backtest_rows(
+    fixtures: list[dict[str, Any]],
+    ratings: RatingMap,
+    *,
+    team_priors: dict[int, Any] | None = None,
+    model_label: str = "baseline",
+) -> list[dict[str, Any]]:
     del ratings
-    rows = walk_forward_backtest_rows(fixtures)
+    rows = walk_forward_backtest_rows(
+        fixtures,
+        team_priors=team_priors,
+        model_label=model_label,
+    )
     for row in rows:
         row["running_accuracy_display"] = percentage(float(row["running_accuracy"]))
         row["confidence_display"] = percentage(float(row["confidence"]))
@@ -1553,6 +1572,14 @@ def backtest_rows(fixtures: list[dict[str, Any]], ratings: RatingMap) -> list[di
         row["form_gap_display"] = numeric_value(row.get("form_gap"), 2)
         row["top_vs_draw_margin_display"] = optional_percentage(
             row.get("top_vs_draw_margin")
+        )
+        row["home_prior_adjustment_display"] = numeric_value(
+            row.get("home_prior_adjustment"),
+            1,
+        )
+        row["away_prior_adjustment_display"] = numeric_value(
+            row.get("away_prior_adjustment"),
+            1,
         )
     return rows
 
@@ -1621,6 +1648,45 @@ def api_football_accuracy_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "correct": correct,
         "accuracy": correct / len(evaluated_rows),
         "unavailable": len(rows) - len(evaluated_rows),
+    }
+
+
+def benchmark_market_context(
+    fixtures: list[dict[str, Any]],
+    ratings: RatingMap,
+) -> dict[str, Any]:
+    rows = backtest_rows(fixtures, ratings)
+    api_predictions_by_fixture = {
+        int(row["fixture_id"]): fetch_api_football_prediction(int(row["fixture_id"]))
+        for row in rows
+    }
+    rows = api_football_running_accuracy_rows(rows, api_predictions_by_fixture)
+    sportmonks_bundle = load_latest_world_cup_enrichment()
+    sportmonks_coverage_rows = sportmonks_mapping_coverage_rows(
+        fixtures,
+        sportmonks_bundle,
+    )
+    rows = sportmonks_candidate_rows(
+        rows,
+        sportmonks_candidate_enrichment_by_api_fixture(sportmonks_coverage_rows),
+    )
+    summary = fair_benchmark_summary(rows)
+    sportmonks_summary = sportmonks_candidate_summary(rows)
+    market_gate = benchmark_market_gate(summary, sportmonks_summary)
+    market_rows = market_edge_rows_for_fixtures(
+        fixtures,
+        ratings,
+        sportmonks_coverage_rows,
+        benchmark_gate=market_gate,
+    )
+    return {
+        "rows": rows,
+        "summary": summary,
+        "sportmonks_summary": sportmonks_summary,
+        "sportmonks_coverage_rows": sportmonks_coverage_rows,
+        "market_gate": market_gate,
+        "market_rows": market_rows,
+        "market_summary": market_edge_summary(market_rows),
     }
 
 
@@ -1803,6 +1869,7 @@ def render_prediction_dashboard(
             "Model Breakdown",
             "Model Comparison",
             "Backtest",
+            "Paper Trading",
             "Provider Status",
             "Snapshots",
         ]
@@ -1848,6 +1915,35 @@ def render_prediction_dashboard(
         st.subheader("Fair Walk-Forward Benchmark")
         rows = backtest_rows(fixtures, ratings)
         if rows:
+            team_priors = load_team_priors()
+            include_team_priors = st.checkbox(
+                "Include non-leaky team-prior ablation",
+                value=bool(team_priors),
+                help=(
+                    "Uses data/team_priors/team_priors.csv only when rows pass "
+                    "pre-kickoff source and timestamp checks."
+                ),
+            )
+            prior_rows: list[dict[str, Any]] = []
+            prior_summary: dict[str, Any] | None = None
+            if include_team_priors and team_priors:
+                prior_rows = backtest_rows(
+                    fixtures,
+                    ratings,
+                    team_priors=team_priors,
+                    model_label="team_priors",
+                )
+                prior_summary = team_prior_ablation_summary(rows, prior_rows)
+            elif include_team_priors:
+                st.info(
+                    "No production team-prior source is loaded. Add a real "
+                    f"pre-match prior file at {TEAM_PRIORS_PATH} with this schema."
+                )
+                st.dataframe(
+                    pd.DataFrame(prior_schema_rows()),
+                    width="stretch",
+                    hide_index=True,
+                )
             include_api_benchmark = st.checkbox(
                 "Include API-Football prediction benchmark",
                 value=True,
@@ -2023,6 +2119,56 @@ def render_prediction_dashboard(
                         "Sample size is small. Treat stronger/weaker conclusions "
                         "as directional until more shared completed fixtures are available."
                     )
+            st.markdown("#### Team-prior ablation")
+            if prior_summary:
+                prior_cols = st.columns(4)
+                prior_cols[0].metric(
+                    "Prior rows with signal",
+                    prior_summary["prior_rows_with_signal"],
+                )
+                prior_cols[1].metric(
+                    "Baseline accuracy",
+                    optional_percentage(prior_summary["baseline_accuracy"]),
+                )
+                prior_cols[2].metric(
+                    "Prior accuracy",
+                    optional_percentage(prior_summary["prior_accuracy"]),
+                )
+                prior_cols[3].metric("Changed picks", prior_summary["changed_picks"])
+                prior_score_cols = st.columns(4)
+                prior_score_cols[0].metric(
+                    "Baseline Brier",
+                    numeric_value(prior_summary["baseline_brier_score"], 3),
+                )
+                prior_score_cols[1].metric(
+                    "Prior Brier",
+                    numeric_value(prior_summary["prior_brier_score"], 3),
+                )
+                prior_score_cols[2].metric(
+                    "Baseline log loss",
+                    numeric_value(prior_summary["baseline_log_loss"], 3),
+                )
+                prior_score_cols[3].metric(
+                    "Prior log loss",
+                    numeric_value(prior_summary["prior_log_loss"], 3),
+                )
+                if prior_summary["candidate_proves_improvement"]:
+                    st.success(
+                        "Team priors improve Brier score and log loss in the "
+                        "walk-forward ablation. Keep this as research until "
+                        "calibration gates are reviewed."
+                    )
+                else:
+                    st.info(
+                        "Team priors are not promoted. Continue using the current "
+                        "model unless the ablation improves both Brier score and "
+                        "log loss."
+                    )
+            elif not team_priors:
+                st.info(
+                    "Team-prior ablation is inactive because no real prior source "
+                    "file is loaded. The model is not using fabricated team ratings."
+                )
             st.markdown("#### SportMonks candidate experiment")
             sportmonks_cols = st.columns(4)
             sportmonks_cols[0].metric("Mapped completed fixtures", sportmonks_summary["mapped"])
@@ -2221,6 +2367,10 @@ def render_prediction_dashboard(
                 "probability_margin_display",
                 "home_rating_before",
                 "away_rating_before",
+                "team_prior_available",
+                "team_prior_source",
+                "home_prior_adjustment_display",
+                "away_prior_adjustment_display",
                 "home_form_matches_before",
                 "away_form_matches_before",
                 "home_form_signal_display",
@@ -2365,9 +2515,192 @@ def render_prediction_dashboard(
             st.info("No completed fixtures are available for backtesting yet.")
 
     with tabs[5]:
-        render_provider_status(fixtures)
+        st.subheader("Paper Trading")
+        context = benchmark_market_context(fixtures, ratings)
+        market_gate = context["market_gate"]
+        market_summary = context["market_summary"]
+        paper_rows = paper_trade_rows(
+            fixtures,
+            context["market_rows"],
+            paper_bankroll=DEFAULT_PAPER_BANKROLL,
+            kelly_multiplier=DEFAULT_KELLY_MULTIPLIER,
+            stake_cap_fraction=DEFAULT_STAKE_CAP_FRACTION,
+        )
+        paper_summary = paper_trade_summary(paper_rows)
+        paper_cols = st.columns(4)
+        paper_cols[0].metric(
+            "Benchmark gate",
+            "passed" if market_gate["passed"] else "blocked",
+        )
+        paper_cols[1].metric("Odds rows", market_summary["fixtures_with_market"])
+        paper_cols[2].metric("Research candidates", paper_summary["research_candidates"])
+        paper_cols[3].metric("Real stake", numeric_value(paper_summary["real_stake_units"], 2))
+        pnl_cols = st.columns(4)
+        pnl_cols[0].metric("Settled", paper_summary["settled"])
+        pnl_cols[1].metric("Open", paper_summary["open"])
+        pnl_cols[2].metric(
+            "Realized paper P&L",
+            numeric_value(paper_summary["realized_pnl_units"], 2),
+        )
+        pnl_cols[3].metric(
+            "ROI on settled",
+            optional_percentage(paper_summary["roi_on_settled"]),
+        )
+        exposure_cols = st.columns(4)
+        exposure_cols[0].metric(
+            "Paper bankroll",
+            numeric_value(DEFAULT_PAPER_BANKROLL, 2),
+        )
+        exposure_cols[1].metric(
+            "Stake cap",
+            optional_percentage(DEFAULT_STAKE_CAP_FRACTION),
+        )
+        exposure_cols[2].metric(
+            "Open exposure",
+            numeric_value(paper_summary["open_exposure_units"], 2),
+        )
+        exposure_cols[3].metric(
+            "Open possible profit",
+            numeric_value(paper_summary["open_possible_profit_units"], 2),
+        )
+        st.markdown("#### Odds Movement")
+        movement_cols = st.columns(4)
+        movement_cols[0].metric("CLV tracked", paper_summary["clv_tracked"])
+        movement_cols[1].metric("Favorable CLV", paper_summary["clv_favorable"])
+        movement_cols[2].metric("Unfavorable CLV", paper_summary["clv_unfavorable"])
+        movement_cols[3].metric("Flat CLV", paper_summary["clv_flat"])
+        entry_cols = st.columns(4)
+        entry_cols[0].metric(
+            "Settled P&L at first odds",
+            numeric_value(paper_summary["settled_first_entry_pnl_units"], 2),
+        )
+        entry_cols[1].metric(
+            "Settled P&L at latest odds",
+            numeric_value(paper_summary["settled_latest_entry_pnl_units"], 2),
+        )
+        entry_cols[2].metric(
+            "Open profit at first odds",
+            numeric_value(paper_summary["open_possible_profit_entry_first_units"], 2),
+        )
+        entry_cols[3].metric(
+            "Open profit at latest odds",
+            numeric_value(paper_summary["open_possible_profit_entry_latest_units"], 2),
+        )
+        st.info(
+            "This tab is a research ledger only. Real stake remains zero while "
+            "the benchmark gate is blocked. Odds come from cached SportMonks "
+            "pre-kickoff full-time-result snapshots."
+        )
+        st.caption(
+            "Refresh odds with `python3 -m src.market_intelligence capture --max-fixtures 20` "
+            "when SPORTMONKS_API_TOKEN is configured. The dashboard reads cached odds only."
+        )
+        if paper_rows:
+            paper_frame = pd.DataFrame(paper_rows)
+            for column in [
+                "model_probability",
+                "market_probability",
+                "edge",
+                "expected_value",
+                "raw_kelly_fraction",
+                "paper_stake_fraction",
+                "clv_probability_delta",
+                "average_overround",
+                "first_market_probability",
+                "latest_market_probability",
+                "first_edge",
+                "latest_edge",
+                "edge_change",
+                "first_expected_value",
+                "latest_expected_value",
+                "expected_value_change",
+            ]:
+                if column in paper_frame.columns:
+                    paper_frame[f"{column}_display"] = paper_frame[column].map(
+                        optional_percentage
+                    )
+            for column in [
+                "best_decimal",
+                "paper_stake_units",
+                "paper_pnl_units",
+                "paper_possible_profit_units",
+                "paper_possible_profit_entry_first_units",
+                "paper_possible_profit_entry_latest_units",
+                "paper_possible_loss_units",
+                "bookie_friendly_cap_units",
+                "first_decimal",
+                "latest_decimal",
+                "best_seen_decimal",
+                "worst_seen_decimal",
+                "paper_pnl_entry_first_units",
+                "paper_pnl_entry_latest_units",
+                "paper_pnl_first_vs_latest_delta_units",
+                "first_hours_to_kickoff",
+                "latest_hours_to_kickoff",
+            ]:
+                if column in paper_frame.columns:
+                    paper_frame[f"{column}_display"] = paper_frame[column].map(
+                        lambda value: numeric_value(value, 2)
+                    )
+            paper_display_columns = [
+                "paper_status",
+                "research_candidate",
+                "match",
+                "outcome",
+                "settled_outcome",
+                "best_decimal_display",
+                "paper_stake_units_display",
+                "paper_pnl_units_display",
+                "paper_possible_profit_units_display",
+                "paper_possible_profit_entry_first_units_display",
+                "paper_possible_profit_entry_latest_units_display",
+                "model_probability_display",
+                "market_probability_display",
+                "edge_display",
+                "expected_value_display",
+                "raw_kelly_fraction_display",
+                "paper_stake_fraction_display",
+                "bookmaker_count",
+                "average_overround_display",
+                "market_snapshots",
+                "first_decimal_display",
+                "latest_decimal_display",
+                "best_seen_decimal_display",
+                "worst_seen_decimal_display",
+                "clv_direction",
+                "clv_probability_delta_display",
+                "first_edge_display",
+                "latest_edge_display",
+                "edge_change_display",
+                "first_expected_value_display",
+                "latest_expected_value_display",
+                "expected_value_change_display",
+                "first_hours_to_kickoff_display",
+                "latest_hours_to_kickoff_display",
+                "paper_pnl_entry_first_units_display",
+                "paper_pnl_entry_latest_units_display",
+                "paper_pnl_first_vs_latest_delta_units_display",
+                "benchmark_gate",
+                "market_captured_at",
+            ]
+            st.dataframe(
+                paper_frame[
+                    [
+                        column
+                        for column in paper_display_columns
+                        if column in paper_frame.columns
+                    ]
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.info("No cached pre-kickoff odds rows are available for paper trading.")
 
     with tabs[6]:
+        render_provider_status(fixtures)
+
+    with tabs[7]:
         st.subheader("Snapshots")
         render_snapshot_list()
 

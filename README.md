@@ -98,7 +98,8 @@ Dashboard tabs:
 - **Predictions**: home/draw/away probabilities, next-goal outputs, outcome bars, and a win/loss/pending result banner when an actual final result is available.
 - **Model Breakdown**: model mode, data source availability, Elo prior, extracted features, proxy/real xG status, live strength components, Poisson expected goals, and explanation drivers.
 - **Model Comparison**: side-by-side benchmark view comparing `Our v2 rules model` with `API-Football prediction` when the API-Football predictions endpoint is available.
-- **Backtest**: fair walk-forward completed-fixture benchmark with cumulative accuracy, shared-fixture API-Football comparison, Brier score, log loss, unavailable benchmark counts, confidence diagnostics, miss/API-disagreement tables, draw-specific diagnostics, and a guarded SportMonks candidate experiment.
+- **Backtest**: fair walk-forward completed-fixture benchmark with cumulative accuracy, shared-fixture API-Football comparison, Brier score, log loss, unavailable benchmark counts, confidence diagnostics, miss/API-disagreement tables, draw-specific diagnostics, a non-leaky team-prior ablation, and a guarded SportMonks candidate experiment.
+- **Paper Trading**: research-only World Cup lifecycle paper ledger using cached SportMonks odds, capped fractional Kelly sizing, open/settled status, realized paper P&L, open exposure, odds movement, CLV direction, edge drift, and first-entry versus latest-entry paper P&L. Real stake remains zero while the benchmark gate is blocked.
 - **Provider Status**: local SportMonks token/audit status, latest sanitized audit path, generated cache status, API-Football to SportMonks mapping coverage, subscription metadata, and rate-limit metadata.
 - **Snapshots**: latest local prediction snapshot files.
 
@@ -118,8 +119,10 @@ football-live-ml/
     features.py
     model.py
     predictor.py
+    paper_trading.py
     ratings.py
     storage.py
+    team_priors.py
     sportmonks_audit.py
     sportmonks_client.py
     sportmonks_enrichment.py
@@ -132,6 +135,7 @@ football-live-ml/
     predictions/
     ratings/
     snapshots/
+    team_priors/
     sportmonks/
   tests/
     test_features.py
@@ -148,6 +152,7 @@ data/snapshots/
 data/predictions/
 data/api_predictions/
 data/ratings/
+data/team_priors/
 data/sportmonks/
 ```
 
@@ -157,6 +162,7 @@ Snapshot files contain fixture metadata, model outputs, capture timestamps, and 
 - `data/predictions/`: prediction outputs with model version and prediction mode.
 - `data/api_predictions/`: normalized API-Football `/predictions` cache files keyed by fixture ID. These are generated local cache files and are ignored by Git.
 - `data/ratings/`: local Elo/team-rating snapshots.
+- `data/team_priors/`: optional curated pre-match team-prior source files. The app expects a real `team_priors.csv`; it does not fabricate production priors.
 - `data/sportmonks/`: generated SportMonks audit and provider-cache workspace. JSON files under this tree are ignored by Git; `.gitkeep` files preserve the directory layout.
 
 ## SportMonks Access Audit
@@ -302,9 +308,15 @@ These interfaces are fallback-safe. With no paid provider configured, the dashbo
 
 `src/market_intelligence.py` provides the odds and market-evaluation layer: sanitized pre-kickoff odds snapshots, full-time-result market normalization, no-vig market-implied probabilities, expected-value comparison, CLV tracking, and benchmark-gated paper-trade flags.
 
+`src/paper_trading.py` provides the research-only paper ledger. It sizes paper entries with capped fractional Kelly, settles completed fixtures against actual outcomes, keeps real stake at zero, and reports realized paper P&L plus open exposure. It also compares first-entry versus latest-entry paper P&L when multiple odds snapshots exist. It does not fetch odds directly; odds come from cached SportMonks pre-kickoff snapshots.
+
+`src/market_intelligence.py` also emits odds-movement fields for paper outcomes: first/latest/best/worst seen decimal odds, first/latest market probability, first/latest edge and expected value, edge change, expected-value change, CLV direction, and hours from each entry snapshot to kickoff.
+
 `src/benchmark.py` provides the fair benchmark path. It scores each completed fixture before updating Elo ratings from that fixture result, then compares against API-Football only on shared fixtures where API-Football has usable home/draw/away probabilities. It also has a SportMonks candidate scorer that refuses enrichment unless the mapped provider data is available before kickoff.
 
 During walk-forward benchmarking, `src/benchmark.py` also maintains simple recent-form state from prior completed fixtures only. Form state tracks points, goals for, goals against, and goal difference over a short window, then lightly adjusts later pre-match expected goals without seeing the fixture being scored.
+
+`src/team_priors.py` defines the optional pre-match team-prior schema. Priors must include `team_id`, `team_name`, `strength_rating`, `source`, `source_category`, `as_of`, and `available_before_kickoff`. The non-leak guard rejects late rows and blocked categories such as fixture results, same-tournament results, odds, and provider predictions. When no real `data/team_priors/team_priors.csv` is loaded, the Backtest tab shows the schema and leaves the headline model unchanged.
 
 ## Testing
 

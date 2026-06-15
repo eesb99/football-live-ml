@@ -20,6 +20,11 @@ from src.ratings import (
     expected_score,
     get_rating,
 )
+from src.team_priors import (
+    TeamPriorMap,
+    eligible_team_prior,
+    prior_adjusted_rating,
+)
 
 
 MODEL_VERSION = "world-cup-rules-v2"
@@ -59,6 +64,12 @@ class PredictionResult:
     injuries_source: str
     news_source: str
     paid_data_availability: str
+    team_prior_available: bool
+    team_prior_source: str
+    home_prior_rating: float | None
+    away_prior_rating: float | None
+    home_prior_adjustment: float
+    away_prior_adjustment: float
     model_drivers: list[str]
 
     def as_dict(self) -> dict[str, Any]:
@@ -93,6 +104,12 @@ class PredictionResult:
             "injuries_source": self.injuries_source,
             "news_source": self.news_source,
             "paid_data_availability": self.paid_data_availability,
+            "team_prior_available": self.team_prior_available,
+            "team_prior_source": self.team_prior_source,
+            "home_prior_rating": self.home_prior_rating,
+            "away_prior_rating": self.away_prior_rating,
+            "home_prior_adjustment": self.home_prior_adjustment,
+            "away_prior_adjustment": self.away_prior_adjustment,
             "model_drivers": self.model_drivers,
             "model_driver_summary": "; ".join(self.model_drivers),
         }
@@ -342,6 +359,7 @@ def prematch_prediction(
     ratings: RatingMap | None = None,
     paid_data: PaidDataSnapshot | None = None,
     form_adjustment: dict[str, Any] | None = None,
+    team_priors: TeamPriorMap | None = None,
 ) -> dict[str, Any]:
     ratings = ratings or {}
     paid_data = paid_data or default_paid_data_snapshot()
@@ -353,14 +371,25 @@ def prematch_prediction(
     away_name = away.get("name") or "Away"
     home_rating = get_rating(ratings, home_id, home_name)
     away_rating = get_rating(ratings, away_id, away_name)
+    kickoff_utc = fixture.get("fixture", {}).get("date")
+    home_prior = eligible_team_prior(team_priors, home_id, kickoff_utc)
+    away_prior = eligible_team_prior(team_priors, away_id, kickoff_utc)
+    adjusted_home_rating, home_prior_adjustment = prior_adjusted_rating(
+        home_rating,
+        home_prior,
+    )
+    adjusted_away_rating, away_prior_adjustment = prior_adjusted_rating(
+        away_rating,
+        away_prior,
+    )
     home_advantage_elo = effective_home_advantage_elo(
         fixture,
         HOME_ADVANTAGE_ELO,
     )
     neutral_site = is_neutral_world_cup_fixture(fixture, HOME_ADVANTAGE_ELO)
     home_xg, away_xg = prematch_expected_goals(
-        home_rating.rating,
-        away_rating.rating,
+        adjusted_home_rating,
+        adjusted_away_rating,
         home_advantage_elo=home_advantage_elo,
         neutral_site=neutral_site,
     )
@@ -372,7 +401,7 @@ def prematch_prediction(
         away_xg,
         form_adjustment,
     )
-    rating_gap = (home_rating.rating + home_advantage_elo) - away_rating.rating
+    rating_gap = (adjusted_home_rating + home_advantage_elo) - adjusted_away_rating
     form_gap = float(
         form_adjustment.get("home_form_signal", 0.0)
         - form_adjustment.get("away_form_signal", 0.0)
@@ -401,11 +430,27 @@ def prematch_prediction(
     drivers = prematch_drivers(
         home_name,
         away_name,
-        home_rating.rating,
-        away_rating.rating,
+        adjusted_home_rating,
+        adjusted_away_rating,
         home_advantage_elo=home_advantage_elo,
         neutral_site=neutral_site,
     )
+    if home_prior or away_prior:
+        sources = sorted(
+            {
+                prior.source
+                for prior in (home_prior, away_prior)
+                if prior is not None
+            }
+        )
+        drivers.append(
+            "Non-leaky pre-match team priors are active with capped rating adjustments "
+            f"({home_name} {home_prior_adjustment:+.1f}, "
+            f"{away_name} {away_prior_adjustment:+.1f})."
+        )
+        drivers.append(f"Team prior source: {', '.join(sources)}.")
+    else:
+        drivers.append("No eligible non-leaky team-strength prior is available for this fixture.")
     drivers.extend(form_drivers)
     if draw > raw_draw + 0.001:
         drivers.append(
@@ -431,8 +476,8 @@ def prematch_prediction(
         home_scores_next_probability=0.0,
         away_scores_next_probability=0.0,
         no_next_goal_probability=1.0,
-        home_strength_score=home_rating.rating,
-        away_strength_score=away_rating.rating,
+        home_strength_score=adjusted_home_rating,
+        away_strength_score=adjusted_away_rating,
         home_proxy_xg=home_xg,
         away_proxy_xg=away_xg,
         home_effective_xg=home_xg,
@@ -453,6 +498,21 @@ def prematch_prediction(
         injuries_source=str(source_fields["injuries_source"]),
         news_source=str(source_fields["news_source"]),
         paid_data_availability=str(source_fields["paid_data_availability"]),
+        team_prior_available=bool(home_prior or away_prior),
+        team_prior_source=", ".join(
+            sorted(
+                {
+                    prior.source
+                    for prior in (home_prior, away_prior)
+                    if prior is not None
+                }
+            )
+        )
+        or "not configured",
+        home_prior_rating=home_prior.effective_rating if home_prior else None,
+        away_prior_rating=away_prior.effective_rating if away_prior else None,
+        home_prior_adjustment=home_prior_adjustment,
+        away_prior_adjustment=away_prior_adjustment,
         model_drivers=drivers,
     ).as_dict()
 
@@ -638,9 +698,15 @@ def predict_fixture(
     events: list[dict[str, Any]] | None = None,
     ratings: RatingMap | None = None,
     paid_data: PaidDataSnapshot | None = None,
+    team_priors: TeamPriorMap | None = None,
 ) -> dict[str, Any]:
     paid_data = paid_data or default_paid_data_snapshot()
-    pre = prematch_prediction(fixture, ratings=ratings, paid_data=paid_data)
+    pre = prematch_prediction(
+        fixture,
+        ratings=ratings,
+        paid_data=paid_data,
+        team_priors=team_priors,
+    )
     features = apply_paid_data_to_features(
         build_match_features(fixture, statistics=statistics, events=events),
         paid_data,
