@@ -226,6 +226,22 @@ Capture pre-kickoff SportMonks odds snapshots explicitly:
 python3 -m src.market_intelligence capture
 ```
 
+On Streamlit Community Cloud, keep the public app read-only by default. To allow
+an owner-only refresh, set these app secrets in Streamlit settings:
+
+```toml
+SPORTMONKS_API_TOKEN = "..."
+ODDS_REFRESH_ADMIN_TOKEN = "use-a-long-random-private-value"
+```
+
+Then open the deployed app with `?admin=1`, enter the admin refresh token in the
+Paper Trading tab, and submit **Refresh cached odds**. The admin path writes
+sanitized odds snapshots to the Streamlit runtime filesystem and clears the
+dashboard cache after a successful refresh. This storage is ephemeral and can be
+lost on app reboot/redeploy. The control is hidden from the normal public URL
+and still requires the admin token because it can spend SportMonks provider
+quota.
+
 The market layer only normalizes full-time result / match-winner odds. It does not use player props, corners, totals, handicaps, enhanced prices, or live markets.
 
 The market logic:
@@ -338,6 +354,7 @@ pip install pytest
 
 - The API-Football API key is read only from `API_FOOTBALL_KEY`.
 - The SportMonks API token is read only from `SPORTMONKS_API_TOKEN` and must not be printed, committed, or persisted in generated audit files.
+- The deployed admin odds refresh also requires `ODDS_REFRESH_ADMIN_TOKEN`; never commit the real value.
 - The API request header is `x-apisports-key`.
 - Missing API keys, API errors, empty live-match responses, and quota/rate-limit responses are handled with explicit exceptions and dashboard messages.
 - The active scoring and live fixture provider remains API-Football. SportMonks is currently an audit/cache/candidate-benchmark and market-evaluation provider only; databases, deployments, automated staking, and additional paid-provider integrations remain out of scope until explicitly added.

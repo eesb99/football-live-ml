@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,7 @@ from src.benchmark import (
     team_prior_ablation_summary,
     walk_forward_backtest_rows,
 )
-from src.config import MissingApiKeyError, load_settings
+from src.config import MissingApiKeyError, MissingSportMonksTokenError, load_settings
 from src.external_predictions import (
     normalize_api_football_prediction,
     unavailable_prediction,
@@ -34,6 +36,7 @@ from src.external_predictions import (
 from src.features import build_live_match_table, build_match_features, is_live_status
 from src.market_intelligence import (
     benchmark_market_gate,
+    capture_pre_kickoff_odds,
     market_edge_rows_for_fixtures,
     market_edge_summary,
 )
@@ -64,6 +67,7 @@ from src.storage import (
     save_snapshot,
 )
 from src.team_priors import TEAM_PRIORS_PATH, load_team_priors, prior_schema_rows
+from src.sportmonks_client import SportMonksError
 from src.sportmonks_enrichment import (
     load_latest_world_cup_enrichment,
     sportmonks_cache_status_rows,
@@ -80,6 +84,9 @@ WORLD_CUP_DEFAULT_SEASON = 2026
 FREE_PLAN_FALLBACK_SEASONS = [2022, 2023, 2024]
 WORLD_CUP_KEYWORDS = ("world cup", "fifa world cup")
 FINAL_STATUS_SHORTS = {"FT", "AET", "PEN"}
+ODDS_REFRESH_ADMIN_TOKEN_ENV = "ODDS_REFRESH_ADMIN_TOKEN"
+ADMIN_REFRESH_SUMMARY_STATE_KEY = "admin_odds_refresh_summary"
+ADMIN_QUERY_VALUES = {"1", "true", "yes", "on"}
 
 
 def apply_page_styles() -> None:
@@ -199,6 +206,34 @@ def numeric_value(value: Any, decimals: int = 1, suffix: str = "") -> str:
     if pd.isna(parsed):
         return "-"
     return f"{parsed:.{decimals}f}{suffix}"
+
+
+def admin_refresh_requested(query_params: dict[str, Any]) -> bool:
+    value = query_params.get("admin")
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "").strip().casefold() in ADMIN_QUERY_VALUES
+
+
+def admin_refresh_token_configured() -> bool:
+    return bool(os.getenv(ODDS_REFRESH_ADMIN_TOKEN_ENV, "").strip())
+
+
+def admin_refresh_authorized(submitted_token: str, expected_token: str) -> bool:
+    submitted = str(submitted_token or "").strip()
+    expected = str(expected_token or "").strip()
+    return bool(submitted and expected) and hmac.compare_digest(submitted, expected)
+
+
+def public_admin_refresh_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    public_keys = [
+        "season_id",
+        "fixtures_considered",
+        "odds_cached",
+        "empty_odds",
+        "errors",
+    ]
+    return {key: summary.get(key) for key in public_keys}
 
 
 def api_display_value(value: Any) -> str:
@@ -1480,6 +1515,62 @@ def render_model_comparison(
     )
 
 
+def render_admin_odds_refresh_panel() -> None:
+    if not admin_refresh_requested(dict(st.query_params)):
+        return
+
+    st.markdown("#### Admin odds refresh")
+    st.caption(
+        "Private control for refreshing cached SportMonks pre-kickoff odds. "
+        "This can spend provider quota, so it requires the admin refresh token."
+    )
+    if not admin_refresh_token_configured():
+        st.warning(
+            "Admin refresh is disabled. Configure SPORTMONKS_API_TOKEN and "
+            f"{ODDS_REFRESH_ADMIN_TOKEN_ENV} in Streamlit Secrets, then reboot the app."
+        )
+        return
+
+    latest_summary = st.session_state.get(ADMIN_REFRESH_SUMMARY_STATE_KEY)
+    if latest_summary:
+        st.success("Latest admin odds refresh completed.")
+        st.dataframe(pd.DataFrame([latest_summary]), width="stretch", hide_index=True)
+
+    with st.form("admin_odds_refresh_form"):
+        submitted_token = st.text_input("Admin refresh token", type="password")
+        max_fixtures = st.number_input(
+            "Max fixtures",
+            min_value=1,
+            max_value=50,
+            value=20,
+            step=1,
+        )
+        submitted = st.form_submit_button("Refresh cached odds")
+
+    if not submitted:
+        return
+
+    expected_token = os.getenv(ODDS_REFRESH_ADMIN_TOKEN_ENV, "").strip()
+    if not admin_refresh_authorized(submitted_token, expected_token):
+        st.error("Admin refresh was not authorized.")
+        return
+
+    try:
+        summary = capture_pre_kickoff_odds(max_fixtures=int(max_fixtures))
+    except MissingSportMonksTokenError:
+        st.error("SPORTMONKS_API_TOKEN is not configured in Streamlit Secrets.")
+        return
+    except SportMonksError as exc:
+        st.error(f"SportMonks odds refresh failed: {str(exc)[:180]}")
+        return
+
+    public_summary = public_admin_refresh_summary(summary)
+    st.session_state[ADMIN_REFRESH_SUMMARY_STATE_KEY] = public_summary
+    st.cache_data.clear()
+    st.success("Cached odds refresh completed. Reloading the dashboard cache.")
+    st.rerun()
+
+
 def render_provider_status(fixtures: list[dict[str, Any]] | None = None) -> None:
     st.subheader("Provider Status")
     st.caption(
@@ -2516,6 +2607,7 @@ def render_prediction_dashboard(
 
     with tabs[5]:
         st.subheader("Paper Trading")
+        render_admin_odds_refresh_panel()
         context = benchmark_market_context(fixtures, ratings)
         market_gate = context["market_gate"]
         market_summary = context["market_summary"]
@@ -2592,8 +2684,8 @@ def render_prediction_dashboard(
             "pre-kickoff full-time-result snapshots."
         )
         st.caption(
-            "Refresh odds with `python3 -m src.market_intelligence capture --max-fixtures 20` "
-            "when SPORTMONKS_API_TOKEN is configured. The dashboard reads cached odds only."
+            "The public dashboard reads cached odds only. Admin refresh is hidden "
+            "behind `?admin=1` and requires Streamlit Secrets."
         )
         if paper_rows:
             paper_frame = pd.DataFrame(paper_rows)

@@ -2,6 +2,8 @@ from src.api_client import ApiFootballError
 from src.ratings import TeamRating
 
 from app.streamlit_app import (
+    admin_refresh_authorized,
+    admin_refresh_requested,
     api_football_accuracy_summary,
     arrow_safe_dataframe,
     api_football_advice_rows,
@@ -17,6 +19,7 @@ from app.streamlit_app import (
     fetch_api_football_prediction,
     model_comparison_rows,
     model_result_banner_data,
+    public_admin_refresh_summary,
     probability_difference,
     probability_rows,
     running_accuracy_rows,
@@ -26,6 +29,44 @@ from app.streamlit_app import (
     sportmonks_provider_status_rows,
     strength_component_rows,
 )
+
+
+def test_admin_refresh_requested_requires_admin_query_flag():
+    assert admin_refresh_requested({"admin": "1"}) is True
+    assert admin_refresh_requested({"admin": "true"}) is True
+    assert admin_refresh_requested({"admin": ["yes"]}) is True
+    assert admin_refresh_requested({"admin": "0"}) is False
+    assert admin_refresh_requested({}) is False
+
+
+def test_admin_refresh_authorized_requires_matching_nonempty_token():
+    assert admin_refresh_authorized("secret-token", "secret-token") is True
+    assert admin_refresh_authorized("wrong-token", "secret-token") is False
+    assert admin_refresh_authorized("", "secret-token") is False
+    assert admin_refresh_authorized("secret-token", "") is False
+
+
+def test_public_admin_refresh_summary_excludes_paths_and_fixture_ids():
+    summary = public_admin_refresh_summary(
+        {
+            "season_id": 26618,
+            "fixtures_considered": 3,
+            "odds_cached": 2,
+            "empty_odds": 1,
+            "errors": 0,
+            "cached_paths": ["/tmp/private/path.json"],
+            "empty_fixture_ids": [123],
+            "error_fixture_ids": [456],
+        }
+    )
+
+    assert summary == {
+        "season_id": 26618,
+        "fixtures_considered": 3,
+        "odds_cached": 2,
+        "empty_odds": 1,
+        "errors": 0,
+    }
 
 
 def test_should_try_free_plan_fallback_detects_api_football_plan_error():
