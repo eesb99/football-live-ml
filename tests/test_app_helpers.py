@@ -38,6 +38,8 @@ def test_public_odds_refresh_summary_excludes_paths_and_fixture_ids():
     summary = public_odds_refresh_summary(
         {
             "season_id": 26618,
+            "fixtures_cached": 72,
+            "fixture_details_cached": 20,
             "fixtures_considered": 3,
             "odds_cached": 2,
             "empty_odds": 1,
@@ -50,6 +52,8 @@ def test_public_odds_refresh_summary_excludes_paths_and_fixture_ids():
 
     assert summary == {
         "season_id": 26618,
+        "fixtures_cached": 72,
+        "fixture_details_cached": 20,
         "fixtures_considered": 3,
         "odds_cached": 2,
         "empty_odds": 1,
@@ -76,6 +80,8 @@ def test_public_odds_refresh_state_round_trips_sanitized_summary(tmp_path):
     save_public_odds_refresh_state(
         {
             "season_id": 26618,
+            "fixtures_cached": 72,
+            "fixture_details_cached": 20,
             "fixtures_considered": 3,
             "odds_cached": 2,
             "empty_odds": 1,
@@ -91,6 +97,8 @@ def test_public_odds_refresh_state_round_trips_sanitized_summary(tmp_path):
     assert state["last_refresh_epoch"] == 1000
     assert state["summary"] == {
         "season_id": 26618,
+        "fixtures_cached": 72,
+        "fixture_details_cached": 20,
         "fixtures_considered": 3,
         "odds_cached": 2,
         "empty_odds": 1,

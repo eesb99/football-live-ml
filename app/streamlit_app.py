@@ -70,6 +70,7 @@ from src.storage import (
 from src.team_priors import TEAM_PRIORS_PATH, load_team_priors, prior_schema_rows
 from src.sportmonks_client import SportMonksError
 from src.sportmonks_enrichment import (
+    fetch_and_cache_world_cup_enrichment,
     load_latest_world_cup_enrichment,
     sportmonks_cache_status_rows,
     sportmonks_candidate_enrichment_by_api_fixture,
@@ -241,6 +242,8 @@ def sportmonks_refresh_settings():
 def public_odds_refresh_summary(summary: dict[str, Any]) -> dict[str, Any]:
     public_keys = [
         "season_id",
+        "fixtures_cached",
+        "fixture_details_cached",
         "fixtures_considered",
         "odds_cached",
         "empty_odds",
@@ -1603,9 +1606,22 @@ def render_public_odds_refresh_panel() -> None:
         return
 
     try:
+        settings = sportmonks_refresh_settings()
+        enrichment_summary = fetch_and_cache_world_cup_enrichment(
+            settings=settings,
+            max_detail_fixtures=PUBLIC_ODDS_REFRESH_MAX_FIXTURES,
+        )
         summary = capture_pre_kickoff_odds(
-            settings=sportmonks_refresh_settings(),
+            settings=settings,
             max_fixtures=PUBLIC_ODDS_REFRESH_MAX_FIXTURES,
+        )
+        summary.update(
+            {
+                "fixtures_cached": enrichment_summary.get("fixtures_cached"),
+                "fixture_details_cached": enrichment_summary.get(
+                    "fixture_details_cached"
+                ),
+            }
         )
     except MissingSportMonksTokenError:
         st.error("SPORTMONKS_API_TOKEN is not configured in Streamlit Secrets.")
