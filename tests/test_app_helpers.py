@@ -24,10 +24,12 @@ from app.streamlit_app import (
     probability_rows,
     running_accuracy_rows,
     save_public_odds_refresh_state,
+    secret_or_env_value,
     should_try_free_plan_fallback,
     sportmonks_audit_check_rows,
     sportmonks_mapping_metric_rows,
     sportmonks_provider_status_rows,
+    sportmonks_token_configured,
     strength_component_rows,
 )
 
@@ -53,6 +55,20 @@ def test_public_odds_refresh_summary_excludes_paths_and_fixture_ids():
         "empty_odds": 1,
         "errors": 0,
     }
+
+
+def test_sportmonks_token_configured_reads_streamlit_secrets(monkeypatch):
+    import app.streamlit_app as app_module
+
+    monkeypatch.delenv("SPORTMONKS_API_TOKEN", raising=False)
+    monkeypatch.setattr(
+        app_module.st,
+        "secrets",
+        {"SPORTMONKS_API_TOKEN": "streamlit-secret-token"},
+    )
+
+    assert secret_or_env_value("SPORTMONKS_API_TOKEN") == "streamlit-secret-token"
+    assert sportmonks_token_configured() is True
 
 
 def test_public_odds_refresh_state_round_trips_sanitized_summary(tmp_path):

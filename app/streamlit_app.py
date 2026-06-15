@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -208,8 +209,33 @@ def numeric_value(value: Any, decimals: int = 1, suffix: str = "") -> str:
     return f"{parsed:.{decimals}f}{suffix}"
 
 
+def streamlit_secret_value(name: str) -> str:
+    try:
+        value = st.secrets.get(name, "")
+    except (AttributeError, KeyError, RuntimeError, FileNotFoundError):
+        return ""
+    return str(value or "").strip()
+
+
+def secret_or_env_value(name: str) -> str:
+    return os.getenv(name, "").strip() or streamlit_secret_value(name)
+
+
 def sportmonks_token_configured() -> bool:
-    return bool(os.getenv("SPORTMONKS_API_TOKEN", "").strip())
+    return bool(secret_or_env_value("SPORTMONKS_API_TOKEN"))
+
+
+def sportmonks_refresh_settings():
+    token = secret_or_env_value("SPORTMONKS_API_TOKEN")
+    if not token:
+        raise MissingSportMonksTokenError(
+            "Missing SPORTMONKS_API_TOKEN. Add it to Streamlit Secrets."
+        )
+    settings = load_settings(
+        require_api_key=False,
+        require_sportmonks_token=False,
+    )
+    return replace(settings, sportmonks_api_token=token)
 
 
 def public_odds_refresh_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1578,6 +1604,7 @@ def render_public_odds_refresh_panel() -> None:
 
     try:
         summary = capture_pre_kickoff_odds(
+            settings=sportmonks_refresh_settings(),
             max_fixtures=PUBLIC_ODDS_REFRESH_MAX_FIXTURES,
         )
     except MissingSportMonksTokenError:
